@@ -1,0 +1,10 @@
+# dsh-session-importer bundle layer: inserts the Session-log import row.
+#
+# Mounted by `dsh plugin --profile <name> add <this package>`, which also adds
+# this package to the profile's bundle list. Every knob is optional — the
+# plugin's Config schema owns the defaults — so a deployment that wants
+# different limits adds its own patch row for the same id with a complete
+# `config` block (a patch replaces the whole config, it does not merge).
+- insert:
+    - id: session-importer
+      name: dsh-session-importer

@@ -1,0 +1,44 @@
+{
+  "name": "dsh-session-importer",
+  "version": "0.1.0",
+  "description": "Import an exported DSH session-log ZIP (dsh-session-<id>.zip) from the dsh web GUI: restores the session, its sub-sessions and its attachments",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "scripts/",
+    "test/",
+    "docs/",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "session"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --check src/index.js && node --check src/client.js && node --check src/zip.js && node --check src/archive.js && node test/smoke.mjs",
+    "verify:e2e": "pwsh -NoProfile -File scripts/verify-e2e.ps1"
+  },
+  "license": "MIT"
+}
