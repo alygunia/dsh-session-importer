@@ -10,7 +10,17 @@ opens, pages, and resumes like any other.
 
 The archive format is the one produced by `@deepseek-ai/dsh-session-log-export`
 (the **Download session log** menu item in the session header, or `/export`):
-`dsh-session-<id>.zip`.
+`dsh-session-<id>.zip`. An archive exported by an *older* DSH is migrated to the
+installed session format on import, so a download stays usable across upgrades.
+
+The plugin follows the deployed harness rather than pinning one release: the
+host half uses only the long-standing Session service contracts, and the browser
+half prefers the current primitives' icon names while still accepting the older
+ones. The two things it needs from the installation are used defensively and
+reported when missing rather than assumed — the session-format library (present
+wherever the JSONL persistence backend is mounted) and the session list's
+`retainedBy.mainView`, which is how the shell itself decides which session is
+open. See `format.migrationUnavailable` and the dialog's workspace fallback line.
 
 ## Install
 
@@ -93,8 +103,8 @@ entry keeps working. `scripts/verify-e2e.ps1` checks the real rendered menu, and
 
 | Archive entry | Imported as |
 |---|---|
-| `session.v3.jsonl` | the root session (the row that shows in the sidebar) |
-| `subagents/<id>/session.v3.jsonl` | one session per subagent, keeping its lineage |
+| `session[.vN].jsonl` | the root session (the row that shows in the sidebar) |
+| `subagents/<id>/session[.vN].jsonl` | one session per subagent, keeping its lineage |
 | `media/<attachmentId>.<ext>` | an image restored into the attachment store |
 | `files/<xx>/<digest>/<name>` | a verbatim file restored into the attachment store |
 
@@ -104,12 +114,26 @@ persistence provider owns the zstd framing, the checksum layout, the injective
 id escaping, and the project-directory naming, and the import therefore works
 against any mounted backend instead of only the JSONL one.
 
+An archive carries the **format generation** it was exported at, while DSH only
+ever writes the generation it implements. An archive from an older DSH is
+therefore handed to that installation's own format library for migration before
+anything is written — the same code DSH uses to read an old log, so nothing is
+reimplemented here and nothing is guessed. The migration is not a version
+number: an older edge lifts tool results into the current role, renames message
+sources, closes evidenced interrupted turns, and appends a parent's missing
+subagent catalog facts. The plan, the response, and the dialog all report the
+archive's generation, the installed one, and whether a migration happened.
+
 ### Guarantees
 
 - **Identity is preserved.** Session ids inside an archive reference each other
   (subagent headers name their parent, tool results name subagent sessions), so
   ids are recreated verbatim; the tree stays internally consistent, and the
   subagent view inside the imported session works.
+- **Older generations are migrated, newer ones are refused.** An archive whose
+  logs predate the installed generation is translated by the installed format
+  library first. An archive from a *newer* DSH is refused with the two version
+  numbers rather than imported as something this build would misread.
 - **Never destructive.** A session id that already exists is *skipped*, never
   overwritten. Re-importing an archive is a no-op that reports
   `alreadyImported: true`, and an import that only partially succeeded can be
@@ -167,8 +191,9 @@ The host route is an exact Fetch route on the shared API channel, so the
 browser session cookie applies and any deployment-provided `/api` policy is
 honoured.
 
-**`GET /api/session.import`** — capability probe; returns the effective limits
-and usage text. No body required.
+**`GET /api/session.import`** — capability probe; returns the effective limits,
+the session-format generation this deployment writes
+(`format.installedVersion`), and usage text. No body required.
 
 **`POST /api/session.import`** — import. Query parameters:
 
@@ -186,6 +211,16 @@ alternative to `?path=`. A JSON response describes the plan, what was
 imported, what was skipped, whether the sessions verified, attachments
 restored, the workspace outcome, and any errors or warnings. Invalid archives
 answer `400`; a failed import answers `500` with the per-session errors.
+
+Every response and the plan carry a `format` block:
+
+| Field | Meaning |
+|---|---|
+| `archivedVersion` | format generation found in the archive's logs |
+| `installedVersion` | generation this deployment writes (`null` if unknown) |
+| `migrationRequired` | whether importing would translate the logs (plan only) |
+| `migratedSessions` | how many logs were translated (import response only) |
+| `migrationUnavailable` | why the generation could not be checked, when it could not |
 
 ```sh
 # inspect without importing
@@ -219,6 +254,11 @@ filesystem and report what changed.
   with the inherited cut derived from its inherited `session/end-seed` marker.
   An archive that lost that marker is refused rather than imported with a
   guessed cut.
+- **An archive newer than the deployment is refused.** Migration runs forward
+  only; a log from a *newer* DSH is rejected with both version numbers instead of
+  being written as something this build would misread. The
+  [format probe](#development) shows what a given installation does to an old
+  log without booting an instance.
 - **Rollback is filesystem-level.** A verified-bad import removes its log
   directories; the in-process session registry may still list the id until the
   next restart if the removal itself failed (the response says so when that
@@ -243,22 +283,36 @@ filesystem and report what changed.
 ## Development
 
 No build step: `src/index.js` is the host half, `src/client.js` is the browser
-half as a classic `window.__ModuleLoader__.load` bundle, and the only runtime
-dependencies are Node built-ins (`node:fs`, `node:path`, `node:zlib`). The ZIP
-reader in `src/zip.js` is a deliberate ~150-line central-directory parser so the
-package needs no dependency install in a profile.
+half as a classic `window.__ModuleLoader__.load` bundle, `src/format.js` is the
+only part that imports anything beyond Node built-ins (it loads the running
+installation's session-format library by resolved path), and the ZIP reader in
+`src/zip.js` is a deliberate ~150-line central-directory parser so the package
+needs no dependency install in a profile.
 
 ```sh
-npm test              # syntax checks + archive smoke test
-npm run verify:e2e    # 24 checks against a throwaway DSH instance (PowerShell 7)
+npm test                      # syntax checks + archive smoke test
+npm test -- path/to/archive.zip   # …against a specific archive
+npm run verify:e2e            # 28 checks against a throwaway DSH instance (PowerShell 7)
 node test/smoke.mjs path/to/other.zip
+node test/format-probe.mjs path/to/archive.zip   # what this DSH does to an old log
 ```
+
+Both the smoke test and the E2E leg need a real exported archive, which is user
+data rather than a checked-in fixture: pass it as an argument, set
+`DSH_TEST_ARCHIVE`, or put a `dsh-session-*.zip` next to `package.json`.
 
 `test/smoke.mjs` exercises the ZIP reader and the import planner against a real
 exported archive: entry classification, header adoption, per-session plans with
 contiguous events, id preservation, cwd stamping, attachment remapping, and the
 planner's refusals (no root log, unknown header field, non-contiguous log,
 seeded log without its marker). It needs no DSH instance.
+
+`test/format-probe.mjs` drives the installed session-format library directly
+against an archive, using absolute paths because a plain `node` process has none
+of the loader's resolution. It prints each log's source generation, the migrated
+generation, event-count deltas, seq density, and the transformations it can see
+(tool-result roles, parent catalog facts), which is the fastest way to find out
+what a DSH upgrade will do to an existing archive.
 
 `scripts/verify-e2e.ps1` boots a throwaway `dsh web` and drives the whole path
 over HTTP, then (with a Chromium-family browser installed) drives the real GUI
@@ -269,17 +323,18 @@ any other way:
 | Group | Checks |
 |---|---|
 | Composition | the overlay keeps exactly one plugin row and points it at this checkout |
-| Plugin halves | bundle present in `__DSH_BOOT__`, served bundle is this client half, fiber `active`, route answers a probe |
-| Import planning | a dry run plans every log without writing, entry accounting adds up, the root keeps its id |
-| Import | every session written, every log read back by the reader, attachments restored, root filed under its workspace |
+| Plugin halves | bundle present in `__DSH_BOOT__`, served bundle is this client half, fiber `active`, route answers a probe with this deployment's session format |
+| Import planning | a dry run plans every log without writing, entry accounting adds up, the root keeps its id, the archive's generation is compared against the installed one |
+| Import | every session written, the reported migration count matches the plan, every log read back by the reader, attachments restored, root filed under its workspace |
 | Visibility | `session/list` carries the sessions with the right cwd, `session/page` loads the root and a subagent child |
 | Idempotency | a repeat import writes nothing and reports `alreadyImported`, a dropped descendant is repaired by re-importing |
 | Workspace choice | `workspace=current` resolves against the named session, an unresolvable one reports the directory it fell back to, and a repeat import with a different choice explains that an existing session cannot be moved |
-| Refusals | raw-body upload imports, a non-ZIP answers 400, an unknown event vocabulary is refused and rolled back with no leftover |
-| Browser (headless) | the client half boots in a real browser, a Session opens, its more-actions menu shows **Import session** directly after **Download session log**, clicking the item opens the import dialog, and the dialog's fields and workspace menu stay legible and fully on screen (composited contrast on the trigger and every menu option, no clipped label, and the list inside the viewport — all under the deployment's own skin and material) |
+| Refusals | raw-body upload imports a current-generation archive without migrating it, a non-ZIP answers 400, an unknown event vocabulary is refused and rolled back with no leftover |
+| Browser (headless) | the client half boots in a real browser, the **imported** session's own row opens (selected by session id, not by label), its more-actions menu shows **Import session** directly after **Download session log**, clicking the item opens the import dialog, and the dialog's fields and its 3 policy options stay legible and fully on screen (composited contrast on the trigger and every option, no clipped label, and the list inside the viewport — all under the deployment's own skin and material) |
 
 ```sh
 pwsh -NoProfile -File scripts/verify-e2e.ps1                 # sample archive in the repo root
+pwsh -NoProfile -File scripts/verify-e2e.ps1 -Archive x.zip  # a specific archive (or set DSH_TEST_ARCHIVE)
 pwsh -NoProfile -File scripts/verify-e2e.ps1 -SkipUi         # HTTP half only, no browser
 pwsh -NoProfile -File scripts/verify-e2e.ps1 -ProbeUi        # dump the rendered shell instead of asserting
 pwsh -NoProfile -File scripts/verify-e2e.ps1 -Archive x.zip -KeepScratch
@@ -298,10 +353,16 @@ by stopping both processes, removing the scratch tree, and re-checking that the
 real profile's install is still there.
 
 The browser leg (`scripts/verify-ui.mjs`) walks the real first-run flow — dismiss
-the beta notice, pick the workspace that owns the imported sessions, open an
-imported session — and writes screenshots of both asserted states to
-`docs/evidence/`. It needs no dependency: the DevTools Protocol runs over Node's
-global `WebSocket`.
+the beta notice, pick the workspace that owns the imported sessions, open the
+session the run imported by its `data-row-key` — and writes screenshots of both
+asserted states to `docs/evidence/`. It needs no dependency: the DevTools
+Protocol runs over Node's global `WebSocket`. Two details of that flow are worth
+knowing before changing it: a first-run workspace pick starts a *blank draft*
+whose sidebar row is unlabelled in exactly the same way an imported session with
+no title projection is, which is why the row is addressed by session id rather
+than by label; and the page can legitimately hold several menus, so the dialog's
+policy list is identified as the one the trigger's own click added, never as
+"the first menu with enough items" (a session row's context menu has five).
 
 Both scripts are PowerShell 7 only (junctions/symlinks, `-SkipHttpErrorCheck`)
 and work on Windows, Linux, and macOS. Three environment behaviours they work

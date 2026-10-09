@@ -31,8 +31,20 @@ window.__ModuleLoader__.load({
     const { useCallback, useEffect, useRef, useState } = React
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     const {
-      Modal, Button, Input, Menu, IconProjectAddOutline16, IconChevronDownOutline14,
+      Modal, Button, Input, Menu,
     } = primitives
+    // The primitives renamed their icons from a size suffix to a weight suffix
+    // (`IconProjectAddOutline16` → `…Regular`); both names carry the same
+    // artwork, so the newer one is preferred and the older one keeps this half
+    // working on a 0.1.x shell.
+    const ProjectAddIcon = primitives.IconProjectAddOutlineRegular ?? primitives.IconProjectAddOutline16
+    const ChevronDownIcon = primitives.IconChevronDownOutlineRegular ?? primitives.IconChevronDownOutline14
+    if (ProjectAddIcon === undefined || ChevronDownIcon === undefined) {
+      // A shell whose primitives export neither name would render
+      // `createElement(undefined)` and crash the whole contribution, so the
+      // failure is named here instead of surfacing as a blank sidebar.
+      throw new Error('dsh-session-importer: this DSH shell exports no project-add/chevron icon this plugin can render')
+    }
 
     /** Locale namespace owned by this plugin's copy. */
     const NS = 'session-import'
@@ -309,13 +321,15 @@ window.__ModuleLoader__.load({
     const DOWNLOAD_LABELS = new Set(['download session log', '下载 session 日志'])
 
     /**
-     * Icon copied from the primitives' `IconProjectAddOutline16` (folder + plus).
-     * Inlined as markup because an injected node is outside React's tree; the
-     * source of truth is the icon the dialog itself renders.
+     * Icon copied from the primitives' `IconProjectAddOutlineRegular` (folder +
+     * plus), artwork and stroke width included, so the injected menu item shows
+     * exactly the icon the dialog renders. Inlined as markup because an injected
+     * node is outside React's tree; the source of truth stays the primitive.
      */
-    const MORE_ICON_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
-      + '<path transform="translate(9.52 2.52)" fill="currentColor" d="M3.55246 0L3.55246 2.44252L6 2.44252L6 3.55748L3.55246 3.55748L3.55246 6L2.43834 6L2.43834 3.55748L0 3.55748L0 2.44252L2.43834 2.44252L2.43834 0L3.55246 0Z"/>'
-      + '<path transform="translate(0.3496 2.35)" fill="currentColor" d="M4.76367 0C5.36861 1.80598e-05 5.93113 0.310294 6.25488 0.821289L6.78027 1.64941C6.79685 1.67558 6.81791 1.69775 6.83887 1.71973C6.72186 2.15521 6.65702 2.61192 6.65137 3.08301C6.25601 2.96045 5.90909 2.70478 5.68164 2.3457L5.15723 1.5166C5.07183 1.38189 4.92318 1.3008 4.76367 1.30078L2.32422 1.30078C1.7589 1.30078 1.30078 1.7589 1.30078 2.32422L1.30078 10.1338C1.30078 10.6991 1.7589 11.1572 2.32422 11.1572L11.9766 11.1572C12.5419 11.1572 13 10.6991 13 10.1338L13 8.58398C13.4545 8.5135 13.8903 8.38748 14.3008 8.21289L14.3008 10.1338C14.3008 11.4171 13.2598 12.458 11.9766 12.458L2.32422 12.458C1.04093 12.458 0 11.4171 0 10.1338L0 2.32422C0 1.04093 1.04093 0 2.32422 0L4.76367 0Z"/>'
+    const MORE_ICON_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1">'
+      + '<path fill="currentColor" d="M5.54492 2.06738C5.91034 2.06754 6.26318 2.20149 6.53711 2.44336L7.94043 3.68164V4.7998C7.71462 4.74105 7.50367 4.63139 7.32617 4.47461L5.87598 3.19238C5.78477 3.11185 5.66658 3.06754 5.54492 3.06738H2.94922C2.67322 3.06738 2.44946 3.29145 2.44922 3.56738V12.4326C2.44927 12.7087 2.67311 12.9326 2.94922 12.9326H12.9326C13.2086 12.9325 13.4326 12.7086 13.4326 12.4326V8.53613H14.4326V12.4326C14.4326 13.2609 13.7609 13.9325 12.9326 13.9326H2.94922C2.12083 13.9326 1.44927 13.261 1.44922 12.4326V3.56738C1.44946 2.73916 2.12094 2.06738 2.94922 2.06738H5.54492Z"/>'
+      + '<path stroke="currentColor" d="M9.75977 4.50208H14.5509"/>'
+      + '<path stroke="currentColor" d="M12.1492 6.89758L12.1492 2.10642"/>'
       + '</svg>'
 
     /**
@@ -333,18 +347,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Close the open menu the injected item lives in, so the dialog is not
-     * covered by it. The primitive's anchor toggles on click; Escape is the
-     * documented fallback when the anchor cannot be found.
+     * Close the menus a click on the injected item would otherwise leave open,
+     * so the dialog is not rendered behind an open list.
+     *
+     * The injected node is outside React's tree and its anchor is not reachable
+     * from it, so the menu is dismissed the way the primitive itself documents:
+     * a keydown Escape it handles, plus an outside pointerdown as the fallback.
+     * A document-wide `[aria-expanded="true"]` anchor search is deliberately not
+     * used — the page can hold another anchor reporting an open menu, and
+     * clicking that one would *open* a list instead of closing this one.
      * @returns nothing.
      */
     function closeOpenMenu() {
-      const anchor = document.querySelector('[aria-haspopup="menu"][aria-expanded="true"]')
-      if (anchor instanceof HTMLElement) {
-        anchor.click()
-        return
-      }
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
     }
 
     /**
@@ -481,13 +497,29 @@ window.__ModuleLoader__.load({
      * The session the user currently has open, sent with every request so that
      * `workspace=current` resolves to *this* session's workspace on the Host
      * instead of falling back to the Host process's own working directory.
+     *
+     * There is no single field for "the open session". Older list snapshots
+     * carried `current` directly; the current shell drops that field and defines
+     * the open session as the one its main view is holding — the same rule
+     * `UiSession` applies to pick its own Session binding (`retainedBy.mainView
+     * > 0`), read here through the public list snapshot.
      * @returns the current session id, or undefined when nothing is selected.
      */
     function currentSessionId() {
       try {
         const snapshot = sessionsService && sessionsService.list ? sessionsService.list.getSnapshot() : undefined
-        const id = snapshot ? snapshot.current : undefined
-        return typeof id === 'string' && id !== '' ? id : undefined
+        if (snapshot === undefined || snapshot === null) return undefined
+        if (typeof snapshot.current === 'string' && snapshot.current !== '') return snapshot.current
+        const rows = snapshot.byId
+        if (rows === undefined || rows === null) return undefined
+        const ids = Array.isArray(snapshot.ids) ? snapshot.ids : Object.keys(rows)
+        for (const id of ids) {
+          const row = rows[id]
+          if (row === undefined || row === null) continue
+          const retainedBy = row.retainedBy
+          if (retainedBy !== undefined && retainedBy !== null && (retainedBy.mainView ?? 0) > 0) return id
+        }
+        return undefined
       } catch {
         return undefined
       }
@@ -701,7 +733,7 @@ window.__ModuleLoader__.load({
             acceptFile(dropped)
           },
         }, [
-          React.createElement(IconProjectAddOutline16, { key: 'icon', size: 20 }),
+          React.createElement(ProjectAddIcon, { key: 'icon', size: 20 }),
           React.createElement('span', { key: 'text' }, file === null ? t('dialog.drop') : `${t('dialog.selected')}${file.name}`),
         ]),
         React.createElement('input', {
@@ -747,7 +779,7 @@ window.__ModuleLoader__.load({
               onClick: () => setWorkspaceMenuOpen((value) => !value),
             }, [
               React.createElement('span', { key: 'label' }, workspaceText(workspace, 'label', t)),
-              React.createElement(IconChevronDownOutline14, { key: 'chevron' }),
+              React.createElement(ChevronDownIcon, { key: 'chevron' }),
             ]),
           }),
           React.createElement('div', { key: 'hint', style: hintStyle }, workspaceText(workspace, 'hint', t)),
@@ -795,7 +827,7 @@ window.__ModuleLoader__.load({
           event.currentTarget.style.background = 'transparent'
         },
       }, [
-        React.createElement(IconProjectAddOutline16, { key: 'icon', size: 16 }),
+        React.createElement(ProjectAddIcon, { key: 'icon', size: 16 }),
         wide ? React.createElement('span', { key: 'label' }, t('action.label')) : null,
       ])
     }

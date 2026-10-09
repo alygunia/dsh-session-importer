@@ -39,6 +39,8 @@ const evidenceDir = args.evidence
 const probe = args.probe === 'true'
 /** Workspace directory name the imported sessions live under (first-run picker). */
 const workspace = args.workspace ?? ''
+/** Session id the run imported, so its sidebar row is selected exactly. */
+const session = args.session ?? ''
 if (!Number.isInteger(cdpPort) || cdpPort <= 0) throw new Error('--cdp <port> is required')
 if (typeof base !== 'string' || base === '') throw new Error('--base <url> is required')
 if (typeof token !== 'string' || token === '') throw new Error('--token <token> is required')
@@ -192,7 +194,22 @@ const PREPARE = `(async () => {
   const bodyText = () => (document.body ? document.body.innerText : '');
   const waitFor = async (fn, ms) => { const end = Date.now() + ms; for (;;) { let v = null; try { v = fn(); } catch { v = null; } if (v) return v; if (Date.now() > end) return null; await sleep(150); } };
   const out = { booted: false, dismissedNotice: false, pickedWorkspace: false, openedSession: false, menuOpen: false, menuItems: [], hasDownload: false, hasImport: false, importAfterDownload: false, injected: false, errors: [] };
-  const closeMenus = async () => { for (let i = 0; i < 3; i++) { if (!document.querySelector('[role="menu"]')) return; document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await sleep(250); } };
+  // Close every open menu. A document-dispatched Escape reaches the primitive's
+  // own capture listener; an outside pointerdown is the dismissal path a
+  // keyboard-only attempt can miss. Neither can *open* a menu, which a
+  // document-wide aria-expanded anchor search can (a row's actions button opens
+  // rather than toggles).
+  const closeMenus = async () => {
+    for (let i = 0; i < 4; i++) {
+      if (!document.querySelector('[role="menu"]')) return;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await sleep(150);
+      if (!document.querySelector('[role="menu"]')) return;
+      document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      document.body.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      await sleep(200);
+    }
+  };
 
   // The sidebar footer action renders only once this plugin's client half is live.
   out.booted = !!(await waitFor(() => /导入会话|Import session/.test(bodyText()), 60000));
@@ -236,25 +253,42 @@ const PREPARE = `(async () => {
   // A Session header (and its menu) exists only while a Session is open, and the
   // hero only gives way to it once a session with content is selected. Picking a
   // workspace in the first-run hero starts a *blank draft*, so the imported
-  // session's own row has to be clicked explicitly.
+  // session's own row has to be clicked explicitly: the run names the id it
+  // imported, and every row carries its own session id as data-row-key, which is
+  // the one identifier that cannot be confused with the blank draft's row.
   const sessionRows = () => Array.from(document.querySelectorAll('[class*="sessionRow" i]'));
+  const wantedId = ${JSON.stringify(session)};
+  const rowForSession = () => wantedId === '' ? null
+    : document.querySelector('[data-row-key="session:' + CSS.escape(wantedId) + '"]');
   const collectDiag = () => ({
     hero: /描述你想要构建的内容/u.test(bodyText()),
     rows: Array.from(document.querySelectorAll('[class*="Row" i]')).slice(0, 8)
-      .map((r) => ({ cls: String(r.className || '').slice(0, 60), text: label(r).slice(0, 40) })),
+      .map((r) => ({ cls: String(r.className || '').slice(0, 60), key: String(r.getAttribute('data-row-key') || '').slice(0, 50), text: label(r).slice(0, 40) })),
     anchors: Array.from(document.querySelectorAll('[aria-haspopup="menu"]')).slice(0, 10)
       .map((a) => ({ cls: String(a.className || '').slice(0, 40), aria: String(a.getAttribute('aria-label') || '').slice(0, 30), text: label(a).slice(0, 30) })),
     menus: Array.from(document.querySelectorAll('[role="menu"]')).length,
   });
   await waitFor(() => (sessionRows().length > 0 ? sessionRows() : null), 20000);
+  await waitFor(() => rowForSession(), 10000);
   const wanted2 = ${JSON.stringify(workspace)};
   const candidates = sessionRows();
-  const target = candidates.find((r) => wanted2 !== '' && label(r).includes(wanted2))
+  const target = rowForSession()
+    ?? candidates.find((r) => wanted2 !== '' && label(r).includes(wanted2))
     ?? candidates.find((r) => !/新会话|New session/u.test(label(r)));
   if (target) {
-    target.click();
+    // The row is the clickable element itself, but a release may wrap the label
+    // in a nested control, so the innermost interactive ancestor is preferred.
+    const clickable = target.querySelector('a, button') ?? target;
+    clickable.click();
     out.openedSession = true;
-    await sleep(1500);
+    // A session with content replaces the hero; keep clicking (the row is
+    // idempotent to open) until it does, so a lost first click is not fatal.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (!/描述你想要构建的内容/u.test(bodyText())) break;
+      await sleep(600);
+      (rowForSession() ?? target).click();
+    }
+    await sleep(1200);
   }
   out.hero = /描述你想要构建的内容/u.test(bodyText());
 
@@ -264,9 +298,12 @@ const PREPARE = `(async () => {
   const downloadRe = /download session log|下载\\s*session\\s*日志/iu;
   let found = null;
   // Prefer the header's own more-actions label so the model/workspace popovers
-  // are not opened as collateral; fall back to trying every anchor.
+  // are not opened as collateral; a sidebar row's "..." button carries the same
+  // wording ("…: <title>") but lives inside a data-row-key element, so it is
+  // excluded and its context menu never opens during the hunt.
   const anchors = Array.from(document.querySelectorAll('[aria-haspopup="menu"]'));
-  const preferred = anchors.filter((a) => /更多操作|more actions/iu.test(String(a.getAttribute('aria-label') || '')));
+  const preferred = anchors.filter((a) => /更多操作|more actions/iu.test(String(a.getAttribute('aria-label') || ''))
+    && a.closest('[data-row-key]') === null);
   for (const anchor of [...preferred, ...anchors.filter((a) => !preferred.includes(a))]) {
     anchor.click();
     const menu = await waitFor(() => {
@@ -274,6 +311,8 @@ const PREPARE = `(async () => {
       return nodes.find((n) => Array.from(n.querySelectorAll('button[role="menuitem"]')).some((b) => downloadRe.test(label(b)))) ?? null;
     }, 2500);
     if (menu) { found = { anchor, menu }; break; }
+    // Whatever this click opened is closed by the same dismissal path, so no
+    // stray list survives into the next phase or the evidence screenshot.
     await closeMenus();
   }
   if (!found) {
@@ -360,7 +399,8 @@ const INSPECT_DIALOG = `(async () => {
   };
   const measure = (el, name) => {
     const style = getComputedStyle(el);
-    const data = { name, color: style.color, backgroundColor: style.backgroundColor };
+    const box = el.getBoundingClientRect();
+    const data = { name, color: style.color, backgroundColor: style.backgroundColor, width: Math.round(box.width), height: Math.round(box.height) };
     data.contrast = Number(contrast(parse(style.color), backdrop(el)).toFixed(2));
     out.fields.push(data);
     return data;
@@ -371,7 +411,11 @@ const INSPECT_DIALOG = `(async () => {
   if (!dialog) { out.errors.push('the import dialog is not open'); return out; }
 
   // The app's Input primitive wraps the field in a span and styles its input.
-  const text = dialog.querySelector('input');
+  // The dialog also carries a hidden file input for the picker, which a bare
+  // querySelector('input') finds first — it is display:none, so measuring it
+  // would report a zero-size field.
+  const text = dialog.querySelector('input[type="text"], input:not([type])')
+    ?? Array.from(dialog.querySelectorAll('input')).find((el) => el.type !== 'file') ?? null;
   if (!text) out.errors.push('the host-path field is missing');
   else measure(text, 'hostPathInput');
 
@@ -381,15 +425,22 @@ const INSPECT_DIALOG = `(async () => {
   if (!trigger) { out.errors.push('the workspace menu trigger is missing'); return out; }
   out.triggerLabel = label(trigger);
   measure(trigger, 'workspaceTrigger');
+  // The page may already hold other open menus (a session row's context menu is
+  // on screen in this flow), so the list is identified as the one this click
+  // added — never as "the first menu with enough items".
+  const menusBefore = new Set(document.querySelectorAll('[role="menu"]'));
   trigger.click();
   const end = Date.now() + 4000;
   let menu = null;
   while (menu === null && Date.now() < end) {
     menu = Array.from(document.querySelectorAll('[role="menu"]'))
-      .find((n) => n.querySelectorAll('button[role="menuitem"]').length >= 3) ?? null;
+      .find((n) => !menusBefore.has(n) && n.querySelectorAll('button[role="menuitem"]').length > 0) ?? null;
     if (menu === null) await sleep(120);
   }
   if (menu === null) { out.errors.push('the workspace menu did not open'); return out; }
+  const expectedOptions = 3;
+  const optionCount = menu.querySelectorAll('button[role="menuitem"]').length;
+  if (optionCount !== expectedOptions) out.errors.push('the workspace menu lists ' + optionCount + ' options, expected ' + expectedOptions);
   await sleep(200);
 
   // "Too long / cut off": the list must sit inside the viewport and no label may
@@ -422,6 +473,19 @@ const INSPECT_DIALOG = `(async () => {
 })()`
 
 // --- run ---------------------------------------------------------------------
+
+// Every phase is a script shipped to the page as a string, so an unbalanced
+// backtick in one of their comments silently ends the template literal and turns
+// the rest of the phase into top-level noise. Parsing each one here — without
+// running it — fails fast with the phase's name instead of as a DevTools
+// SyntaxError halfway through a boot.
+for (const [phase, source] of Object.entries({ PROBE, PREPARE, ACTIVATE, INSPECT_DIALOG })) {
+  try {
+    new Function(`return (${source})`)
+  } catch (error) {
+    throw new Error(`${phase} is not valid JavaScript: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
 
 const summary = { ok: false, prepare: null, activate: null, errors: [] }
 let cdp
@@ -461,7 +525,6 @@ try {
   }
 
   summary.ok = summary.prepare.booted === true
-    && summary.prepare.headerAnchor === true
     && summary.prepare.menuOpen === true
     && summary.prepare.hasDownload === true
     && summary.prepare.hasImport === true

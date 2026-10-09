@@ -37,7 +37,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --check src/index.js && node --check src/client.js && node --check src/zip.js && node --check src/archive.js && node test/smoke.mjs",
+    "test": "node --check src/index.js && node --check src/client.js && node --check src/format.js && node --check src/zip.js && node --check src/archive.js && node test/smoke.mjs",
     "verify:e2e": "pwsh -NoProfile -File scripts/verify-e2e.ps1"
   },
   "license": "MIT"

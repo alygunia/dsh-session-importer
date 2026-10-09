@@ -4,7 +4,9 @@
 
 在 dsh web 界面里把导出的会话日志 ZIP 导回 DeepSeek Harness（DSH）。会话、它的子会话日志以及被引用的附件都通过常规的 Session 服务重建，因此导入的会话与原生创建的会话没有区别——它会出现在侧边栏，并且像其他会话一样打开、分页、续跑。
 
-归档格式就是 `@deepseek-ai/dsh-session-log-export` 产出的那一种（会话标题栏「更多操作」里的 **Download session log**，或 `/export` 命令）：`dsh-session-<id>.zip`。
+归档格式就是 `@deepseek-ai/dsh-session-log-export` 产出的那一种（会话标题栏「更多操作」里的 **Download session log**，或 `/export` 命令）：`dsh-session-<id>.zip`。由*旧版* DSH 导出的归档会在导入时迁移到已装的会话格式，所以一次下载在升级之后依然可用。
+
+插件跟随已部署的 harness，而不是钉死某个版本：主机半边只用长期稳定的 Session 服务契约，浏览器半边优先使用当前 primitives 的图标名，同时也接受旧名。它需要安装提供的那两样东西都是「用不到就降级并报告」，而不是假定存在——会话格式库（凡挂载了 JSONL persistence 后端的地方都有）与会话列表上的 `retainedBy.mainView`，后者正是 shell 自己用来判定「哪个会话是打开着的」的依据。见 `format.migrationUnavailable` 与对话框里工作区的回退说明。
 
 ## 安装
 
@@ -57,16 +59,19 @@ dsh plugin --profile web add E:/Project/dsh-ext/dsh-session-importer
 
 | 归档条目 | 导入为 |
 |---|---|
-| `session.v3.jsonl` | 根会话（就是侧边栏里显示的那一行） |
-| `subagents/<id>/session.v3.jsonl` | 每个子会话一个会话，保留其谱系 |
+| `session[.vN].jsonl` | 根会话（就是侧边栏里显示的那一行） |
+| `subagents/<id>/session[.vN].jsonl` | 每个子会话一个会话，保留其谱系 |
 | `media/<attachmentId>.<ext>` | 恢复进附件存储的图片 |
 | `files/<xx>/<digest>/<name>` | 恢复进附件存储的原样文件 |
 
 日志是通过 `ctx.sessionPersistence.create()` / `handle.append()` / `handle.flush()` 写入的，而不是自己写文件：zstd 帧、校验和布局、单射的 id 转义、项目目录命名都归 persistence provider 所有，因此导入对任何已挂载的后端都成立，而不只是 JSONL 那一个。
 
+归档带着它**导出时的格式世代**，而 DSH 只会写出它自己实现的那一代。因此来自旧版 DSH 的归档会先交给该安装自带的格式库做迁移，再写入任何内容——用的就是 DSH 读取旧日志的同一份代码，这里既不重新实现也不猜测。迁移不等于改个版本号：旧边要把工具结果提升成当前的角色、重命名消息来源、补齐有据可循的中断回合，并为父会话补上缺失的子会话目录事实。计划、响应和对话框都会报告归档世代、已装世代，以及是否发生了迁移。
+
 ### 保证
 
 - **保留身份。** 归档内部的会话 id 互相引用（子会话的 header 写着父 id，工具结果里带着子会话 id），所以 id 按原样重建；关系树内部保持自洽，导入会话里的子会话视图可用。
+- **只向后迁移，不向前猜。** 早于已装世代的归档先由已装格式库翻译；来自*更新*版 DSH 的归档会被带上两个版本号拒绝，而不是当成这个构建会误读的东西导进来。
 - **从不破坏性写入。** 已存在的会话 id 一律*跳过*，绝不覆盖。重复导入是报告 `alreadyImported: true` 的无操作；只完成了一部分的导入可以靠再次导入同一个归档补齐——缺的被写进去，已有的被跳过。
 - **先校验，不通过就回滚。** 写完之后每个导入的日志都会通过 persistence 读取路径回读一遍，harness 正是在那里校验事件词表与重放不变量。这个构建无法解释的日志（比如来自更新版 harness 的归档）会响亮失败，其文件随即被删除，因此坏会话不会落进侧边栏。
 - **分组是尽力而为。** 根会话通过 `ctx.workspaceRegistry` 归入其工作区。如果工作区记录写不进去，或归档里的 cwd 在本机已不存在，会话照样导入并可见——只是归到「未分组」，对话框里会说明。
@@ -105,7 +110,7 @@ dsh plugin --profile web add E:/Project/dsh-ext/dsh-session-importer
 
 主机路由是共享 API 通道上的一条 exact Fetch 路由，因此浏览器会话 cookie 照常生效，部署提供的 `/api` 策略也会被遵守。
 
-**`GET /api/session.import`** —— 能力探测；返回生效的限制与用法说明，不需要请求体。
+**`GET /api/session.import`** —— 能力探测；返回生效的限制、本部署写出的会话格式世代（`format.installedVersion`）与用法说明，不需要请求体。
 
 **`POST /api/session.import`** —— 导入。查询参数：
 
@@ -119,6 +124,16 @@ dsh plugin --profile web add E:/Project/dsh-ext/dsh-session-importer
 | `dryRun=true` | 只解析并给出计划，不写任何东西 |
 
 `Content-Type: application/json` 加 `{"path": …}` 可作为 `?path=` 的替代。JSON 响应描述计划、导入了什么、跳过了什么、会话是否通过校验、恢复了多少附件、工作区结果，以及全部错误与警告。非法归档返回 `400`；导入失败返回 `500`，并带上逐个会话的错误。
+
+每个响应与计划都带一个 `format` 块：
+
+| 字段 | 含义 |
+|---|---|
+| `archivedVersion` | 归档日志里的格式世代 |
+| `installedVersion` | 本部署写出的世代（未知时为 `null`） |
+| `migrationRequired` | 导入是否会翻译这些日志（仅计划里有） |
+| `migratedSessions` | 实际翻译了多少个日志（仅导入响应里有） |
+| `migrationUnavailable` | 无法判定世代时的原因 |
 
 ```sh
 # 只看不导
@@ -140,6 +155,7 @@ curl -X POST --data-binary @dsh-session-x.zip -H 'content-type: application/zip'
 - **浏览器路径会把归档整个缓冲。** 上传走 buffered Fetch 路由（部署整体上限 300 MiB）；插件自己的 `maxUploadBytes` 是更紧的那道限制。归档很大时请改用主机路径而不是上传。
 - **cwd 必须存在。** 工作区分组需要归档里的目录真实存在，注册表才能把它规范化；解析到别处的 cwd 会归入「未分组」，而不是被搬走。
 - **种子切点重建。** fork 出来的种子日志（`isSeeded: true`）会用其 inherited `session/end-seed` 标记推导出的继承前缀来恢复。丢失该标记的归档会被拒绝，而不是拿一个猜出来的切点导入。
+- **比本部署更新的归档会被拒绝。** 迁移只向后做；来自*更新*版 DSH 的日志会被带上两个版本号拒绝，而不是当成这个构建会误读的东西写进去。[格式探针](#开发)可以在不起实例的情况下看清某个安装会对旧日志做什么。
 - **回滚是文件系统级别的。** 校验失败的回滚会删除它的日志目录；如果删除本身也失败了，进程内的会话注册表可能要到下次重启才不再列出该 id（发生这种情况时响应里会说明）。
 - **已存在的会话无法在工作区之间移动。** 会话属于「日志 header 里记录的 cwd」对应的那个工作区，而 header 一旦写入就不可改写（日志是 append-only）。所以无论你选哪个工作区，重复导入都不会把已有会话搬家——要换工作区，请先删除该会话再导入。对话框现在会直接说明这一点，而不是报一个「什么都没有发生」。
 - **「当前工作区」指的是你打开的那个会话。** 浏览器会把选中的会话 id 发过来，主机读取它存储的 cwd。没有打开任何会话时无从解析，主机会退回到自己的工作目录——响应与对话框都会报出这个回退，因为那个目录决定分组。
@@ -147,32 +163,39 @@ curl -X POST --data-binary @dsh-session-x.zip -H 'content-type: application/zip'
 
 ## 开发
 
-没有构建步骤：`src/index.js` 是主机半边，`src/client.js` 是以经典 `window.__ModuleLoader__.load` 形式加载的浏览器半边，运行时依赖只有 Node 内置模块（`node:fs`、`node:path`、`node:zlib`）。`src/zip.js` 里那约 150 行的中央目录解析器是刻意的，这样包在 profile 里不需要安装任何依赖。
+没有构建步骤：`src/index.js` 是主机半边，`src/client.js` 是以经典 `window.__ModuleLoader__.load` 形式加载的浏览器半边，`src/format.js` 是唯一会导入 Node 内置模块以外东西的部分（它按解析出的路径加载运行中安装的会话格式库），`src/zip.js` 里那约 150 行的中央目录解析器是刻意的，这样包在 profile 里不需要安装任何依赖。
 
 ```sh
-npm test              # 语法检查 + 归档冒烟测试
-npm run verify:e2e    # 对一次性 DSH 实例跑 24 项检查（PowerShell 7）
+npm test                      # 语法检查 + 归档冒烟测试
+npm test -- path/to/archive.zip   # ……改用指定归档
+npm run verify:e2e            # 对一次性 DSH 实例跑 28 项检查（PowerShell 7）
 node test/smoke.mjs path/to/other.zip
+node test/format-probe.mjs path/to/archive.zip   # 看本 DSH 会对旧日志做什么
 ```
 
+冒烟测试与 E2E 都需要一份真实导出的归档，它属于用户数据而不是签入的夹具：用参数传入、设 `DSH_TEST_ARCHIVE`，或把 `dsh-session-*.zip` 放在 `package.json` 旁边。
+
 `test/smoke.mjs` 拿真实导出归档检验 ZIP 读取器与导入计划器：条目分类、header 采纳、逐会话连续事件的计划、id 保留、cwd 盖章、附件重映射，以及计划器的拒绝路径（没有根日志、header 含未知字段、日志 seq 不连续、种子日志缺标记）。它不需要 DSH 实例。
+
+`test/format-probe.mjs` 直接用绝对路径驱动已装的会话格式库处理一份归档（裸 `node` 进程没有装载器的解析能力）。它会打印每个日志的源世代、迁移后的世代、事件数增减、seq 是否致密，以及能观察到的变换（工具结果角色、父会话目录事实），是查明一次 DSH 升级会怎样处理既有归档的最快方式。
 
 `scripts/verify-e2e.ps1` 会起一个一次性 `dsh web`，先用 HTTP 把整条链路驱动一遍，然后（在装有 Chromium 系浏览器时）通过 DevTools 协议无头驱动真实 GUI。它断言的是结果而不是日志，因为这个插件的浏览器半边没有别的检查方式：
 
 | 分组 | 检查内容 |
 |---|---|
 | Composition | overlay 只留下一行插件行并指向本 checkout |
-| 插件两半 | bundle 出现在 `__DSH_BOOT__` 中、被服务的 bundle 就是本包的客户端半边、fiber 为 `active`、路由能应答探针 |
-| 导入计划 | 干跑能规划全部日志且不写入、条目计数自洽、根会话保留其 id |
-| 导入 | 每个会话都写入、每个日志都被读取器回读、附件已恢复、根会话归入其工作区 |
+| 插件两半 | bundle 出现在 `__DSH_BOOT__` 中、被服务的 bundle 就是本包的客户端半边、fiber 为 `active`、路由能应答带本部署会话格式的探针 |
+| 导入计划 | 干跑能规划全部日志且不写入、条目计数自洽、根会话保留其 id、归档世代与已装世代做了比较 |
+| 导入 | 每个会话都写入、报告的迁移数量与计划一致、每个日志都被读取器回读、附件已恢复、根会话归入其工作区 |
 | 可见性 | `session/list` 带出这些会话且 cwd 正确，`session/page` 能加载根会话与一个子会话 |
 | 幂等 | 重复导入不写入任何东西并报告 `alreadyImported`，被删掉的子会话能靠再导入补齐 |
 | 工作区选择 | `workspace=current` 按指定会话解析、解析不到时报出实际回退到的目录、重复导入时换了选择也会说明已存在的会话无法移动 |
-| 拒绝 | 原始请求体上传可导入、非 ZIP 返回 400、未知事件词表被拒绝并回滚且不留残留 |
-| 浏览器（无头） | 客户端半边在真实浏览器里启动、会话打开、其「更多操作」菜单中 **导入会话** 紧跟在 **下载 Session 日志** 之后、点击这一项能打开导入对话框，且对话框的输入框与工作区菜单在**部署自身的皮肤与材质下**保持可读且完整显示（对触发器与每个菜单选项按合成背景计算对比度、无文字被截断、列表不超出视口） |
+| 拒绝 | 当前世代的归档上传导入且不做迁移、非 ZIP 返回 400、未知事件词表被拒绝并回滚且不留残留 |
+| 浏览器（无头） | 客户端半边在真实浏览器里启动、**被导入会话自己的那一行**被打开（按会话 id 选中，而不是按标题猜）、其「更多操作」菜单中 **导入会话** 紧跟在 **下载 Session 日志** 之后、点击这一项能打开导入对话框，且对话框的输入框与它的 3 个策略选项在**部署自身的皮肤与材质下**保持可读且完整显示（对触发器与每个选项按合成背景计算对比度、无文字被截断、列表不超出视口） |
 
 ```sh
 pwsh -NoProfile -File scripts/verify-e2e.ps1                 # 用 repo 根目录里的示例归档
+pwsh -NoProfile -File scripts/verify-e2e.ps1 -Archive x.zip  # 指定归档（或设 DSH_TEST_ARCHIVE）
 pwsh -NoProfile -File scripts/verify-e2e.ps1 -SkipUi         # 只跑 HTTP 部分，不起浏览器
 pwsh -NoProfile -File scripts/verify-e2e.ps1 -ProbeUi        # 打印渲染出的结构而不做断言
 pwsh -NoProfile -File scripts/verify-e2e.ps1 -Archive x.zip -KeepScratch
@@ -180,7 +203,7 @@ pwsh -NoProfile -File scripts/verify-e2e.ps1 -Archive x.zip -KeepScratch
 
 它用目标 profile 的一份副本加 `node_modules` 链接搭出临时实例（启动 profile 不会跑包安装，所以既不需要网络也不会装任何东西），以绝对源码路径挂载插件——当该包已经装进 profile 时**改写成 patch 而非 insert**，否则会因为重复 id 直接启动失败——并在系统分配的端口上启动。它还会把部署的主题状态（`dream-skin.json`、`settings.yaml`；用 `-ThemeHome` 指向别处）复制进临时 home，因此浏览器那一段渲染的就是用户实际拥有的皮肤、材质与壁纸。真实 DSH home 不会被写入；跑完会停掉两个进程、删除临时目录，并复查真实 profile 的安装仍然在。
 
-浏览器那一段（`scripts/verify-ui.mjs`）会走真实的首启流程——关掉内测声明、选中拥有导入会话的工作区、打开一个导入的会话——并把两个被断言状态的截图写到 `docs/evidence/`。它不需要任何依赖：DevTools 协议跑在 Node 的全局 `WebSocket` 上。
+浏览器那一段（`scripts/verify-ui.mjs`）会走真实的首启流程——关掉内测声明、选中拥有导入会话的工作区、按 `data-row-key` 打开本次运行导入的那个会话——并把两个被断言状态的截图写到 `docs/evidence/`。它不需要任何依赖：DevTools 协议跑在 Node 的全局 `WebSocket` 上。改这段流程前有两点值得先知道：首启选工作区会开出一个*空白草稿*，而它的侧边栏行与「还没有标题投影的导入会话」在标签上一模一样，所以那一行是按会话 id 而不是按标题定位的；页面合法地可以同时存在多个菜单，因此对话框的策略列表只认「触发器这一击新开出来的那个」，绝不认「第一个条目够多的菜单」（会话行的右键菜单有 5 项）。
 
 两个脚本都仅支持 PowerShell 7（用到 junction/symlink、`-SkipHttpErrorCheck`），Windows、Linux、macOS 均可运行。它们绕开了三个环境行为，三者在受限的 Windows 策略下都属正常：`taskkill /T` 与 `Get-NetTCPConnection` 都可能被拒绝，因此子进程清理回落到 `netstat -ano` 加 `Stop-Process`；「先杀掉直接子进程」是脚本能返回的前提（PowerShell 会一直 drain 被 spawn 进程的 redirect 流，直到那个子进程的句柄关闭）；而屏蔽命名管道的沙箱会让 Chromium 根本起不来，那种环境下浏览器那一段无法运行（用 `-SkipUi` 明确跳过）。
 

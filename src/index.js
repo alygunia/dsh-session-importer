@@ -12,6 +12,11 @@
 // imported session is therefore identical to a natively written one no matter
 // which persistence provider is mounted.
 //
+// An archive keeps the *format generation* it was exported at, while the
+// backend only encodes the generation this DSH implements. A stale archive is
+// therefore handed to the installed format library for migration before it is
+// written; see `./format.js`.
+//
 // Identity is preserved. Session ids inside an archive are referenced from
 // other places in the same archive (subagent headers name their parent, tool
 // results carry subagent ids), so regenerating ids would silently break the
@@ -22,6 +27,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { readZipEntries, ZipReadError } from './zip.js'
 import { ArchiveError, buildImportPlan, classifyArchive, readRootHeader, remapAttachments } from './archive.js'
+import { FormatError, describeFormat, installedFormatVersion, migratePlan } from './format.js'
 
 export const name = 'dsh-session-importer'
 // Every dependency is optional: a browser profile provides `connection`, an
@@ -407,7 +413,13 @@ async function executeImport(ctx, plan, config, targetCwd) {
         continue
       }
       await writeSession(persistence, session)
-      imported.push({ sessionId: id, role: session.role, events: session.events.length, logName: session.logName })
+      imported.push({
+        sessionId: id,
+        role: session.role,
+        events: session.events.length,
+        logName: session.logName,
+        ...(session.migratedFrom === undefined ? {} : { migratedFrom: session.migratedFrom }),
+      })
     } catch (error) {
       errors.push(`${session.logName} (${id}): ${messageOf(error)}`)
       if (session.role === 'root') break
@@ -499,6 +511,9 @@ async function runImport(ctx, request, config) {
         ok: true,
         service: name,
         dryRun: true,
+        // The generation this deployment writes, so a caller can tell whether an
+        // archive it holds would be migrated before any of it is uploaded.
+        format: { installedVersion: await installedFormatVersion() },
         limits: { maxUploadBytes: config.maxUploadBytes, maxExtractedBytes: config.maxExtractedBytes, allowHostPath: config.allowHostPath },
         usage: 'POST the session-log ZIP as the raw request body, or pass ?path=<absolute host path>. Add ?dryRun=true to inspect without importing.',
       },
@@ -513,6 +528,7 @@ async function runImport(ctx, request, config) {
     sessionId: body?.sessionId ?? url.searchParams.get('sessionId') ?? undefined,
   })
   const plan = buildImportPlan(archive, { cwd: target.cwd })
+  const format = await describeFormat(plan.sessions)
   const planSummary = {
     archiveBytes: bytes.length,
     entries: entries.size,
@@ -527,6 +543,7 @@ async function runImport(ctx, request, config) {
     rootId: rootHeader.id,
     createdAt: rootHeader.createdAt,
     agentPreset: rootHeader.agentPreset ?? null,
+    format,
     sessions: plan.sessions.slice(0, MAX_REPORTED_SESSIONS).map((session) => ({
       sessionId: session.header.id,
       role: session.role,
@@ -537,8 +554,17 @@ async function runImport(ctx, request, config) {
     warnings: plan.warnings,
   }
   if (dryRun) return { status: 200, payload: { ok: true, dryRun: true, plan: planSummary } }
-  const result = await executeImport(ctx, plan, config, target.cwd)
+  // An archive from an older DSH carries that DSH's generation; the installed
+  // format library owns the translation to what this one writes.
+  const migration = await migratePlan(plan)
+  const result = await executeImport(ctx, migration.plan, config, target.cwd)
   const warnings = [...plan.warnings]
+  if (migration.migratedSessions > 0) {
+    warnings.push(`the archive carries Session format v${format.archivedVersion}, which this DSH migrated to v${migration.currentVersion} before writing (${migration.migratedSessions} log(s))`)
+  }
+  if (migration.unavailable !== undefined) {
+    warnings.push(`the archive was written as exported because its format could not be checked: ${migration.unavailable}`)
+  }
   // The workspace outcome travels as a structured field rather than as a warning
   // line: the browser renders it localized, and duplicating it in `warnings`
   // would print the same fact twice.
@@ -562,6 +588,12 @@ async function runImport(ctx, request, config) {
         remappedReferences: result.remapped,
       },
       workspace,
+      format: {
+        archivedVersion: format.archivedVersion,
+        installedVersion: format.installedVersion,
+        migratedSessions: migration.migratedSessions,
+        ...(migration.unavailable === undefined ? {} : { migrationUnavailable: migration.unavailable }),
+      },
       errors: result.errors,
       warnings,
       rootSessionId: result.imported.find((entry) => entry.role === 'root')?.sessionId ?? null,
@@ -586,7 +618,7 @@ export function apply(ctx, config = CONFIG_DEFAULTS) {
           const { status, payload } = await runImport(ctx, request, config)
           return json(status, payload)
         } catch (error) {
-          const status = error instanceof ArchiveError || error instanceof ZipReadError ? 400 : 500
+          const status = error instanceof ArchiveError || error instanceof ZipReadError || error instanceof FormatError ? 400 : 500
           return json(status, { ok: false, error: messageOf(error) })
         }
       },
@@ -628,6 +660,7 @@ export function apply(ctx, config = CONFIG_DEFAULTS) {
               `archive: ${plan.root} (${plan.sessions.length} session log(s), ${plan.media} image(s), ${plan.files} file(s))`,
               `root session: ${plan.rootId}`,
               `target workspace: ${plan.targetCwd} (${plan.targetCwdSource})`,
+              `format: archive v${plan.format.archivedVersion}, installed v${plan.format.installedVersion ?? '(unknown)'}${plan.format.migrationRequired === true ? ', migration required' : ''}`,
               `events: ${plan.sessions.reduce((total, session) => total + session.events, 0)}`,
               ...plan.warnings.map((warning) => `warning: ${warning}`),
             ].join('\n')
@@ -635,6 +668,7 @@ export function apply(ctx, config = CONFIG_DEFAULTS) {
           const lines = [
             `imported: ${payload.imported.length} session(s), ${payload.attachments.restored} attachment(s) restored`,
             `root session id: ${payload.rootSessionId ?? '(none)'}`,
+            `format: archive v${payload.format.archivedVersion}, installed v${payload.format.installedVersion ?? '(unknown)'}, ${payload.format.migratedSessions} log(s) migrated`,
             payload.workspace?.grouped === true
               ? `workspace group: ${payload.workspace.path}`
               : `workspace group: none (${payload.workspace?.reason ?? 'not grouped'})`,

@@ -6,7 +6,7 @@
 // (persistence writes, workspace grouping, the HTTP route) needs a live
 // deployment and is covered by the manual checks in README.md.
 //
-//   node test/smoke.mjs [path/to/archive.zip]
+//   node test/smoke.mjs [path/to/archive.zip]      (or set DSH_TEST_ARCHIVE)
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -19,11 +19,19 @@ import { classifyArchive, buildImportPlan, parseSessionLog, readRootHeader, rema
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.join(here, '..')
 
-/** Locate the sample archive: explicit argv path, else the workspace copy. */
+/**
+ * Locate the sample archive: explicit argv path, `DSH_TEST_ARCHIVE`, else a
+ * `dsh-session-session-*.zip` beside this package. The archive is user data
+ * rather than a checked-in fixture, so it may live anywhere.
+ * @returns the archive path.
+ */
 function sampleArchive() {
   if (process.argv[2] !== undefined) return process.argv[2]
+  if (typeof process.env.DSH_TEST_ARCHIVE === 'string' && process.env.DSH_TEST_ARCHIVE !== '') return process.env.DSH_TEST_ARCHIVE
   const candidate = fs.readdirSync(root).find((name) => name.startsWith('dsh-session-session-') && name.endsWith('.zip'))
-  if (candidate === undefined) throw new Error('no sample archive found; pass one as the first argument')
+  if (candidate === undefined) {
+    throw new Error(`no sample archive found: pass one as the first argument, set DSH_TEST_ARCHIVE, or put a dsh-session-session-*.zip in ${root}`)
+  }
   return path.join(root, candidate)
 }
 

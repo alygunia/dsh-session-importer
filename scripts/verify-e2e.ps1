@@ -129,10 +129,13 @@ $realModules = Join-Path $realProfile 'node_modules'
 if (-not (Test-Path -LiteralPath $realModules)) { throw "profile has no installed node_modules: $realModules" }
 
 if (-not $Archive) {
-    $sample = Get-ChildItem -LiteralPath $repo -Filter 'dsh-session-*.zip' -File |
-        Select-Object -First 1
-    if (-not $sample) { throw "no archive given and no dsh-session-*.zip found in $repo" }
-    $Archive = $sample.FullName
+    if ($env:DSH_TEST_ARCHIVE) { $Archive = $env:DSH_TEST_ARCHIVE }
+    else {
+        $sample = Get-ChildItem -LiteralPath $repo -Filter 'dsh-session-*.zip' -File |
+            Select-Object -First 1
+        if (-not $sample) { throw "no archive given: pass -Archive <path>, set DSH_TEST_ARCHIVE, or put a dsh-session-*.zip in $repo" }
+        $Archive = $sample.FullName
+    }
 }
 $Archive = (Resolve-Path -LiteralPath $Archive).Path
 if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) { throw "archive not found: $Archive" }
@@ -470,9 +473,13 @@ try {
     }
 
     Test-Case 'the served bundle is this package client half' {
-        $bundle = Invoke-Api -Uri ($script:Base + $script:BootEntry.url) -Method GET
+        # A boot entry's url is relative to the document, so it carries no
+        # leading slash; joining it onto the origin needs one.
+        $bundlePath = [string]$script:BootEntry.url
+        if (-not $bundlePath.StartsWith('/')) { $bundlePath = '/' + $bundlePath }
+        $bundle = Invoke-Api -Uri ($script:Base + $bundlePath) -Method GET
         Assert-True ($bundle.Status -eq 200) "bundle answered HTTP $($bundle.Status)"
-        foreach ($marker in 'sidebar.footer.action', 'shell.overlay', '/api/session.import', 'data-dsh-session-importer') {
+        foreach ($marker in 'sidebar.footer.action', 'shell.overlay', '/api/session.import', 'data-dsh-session-importer', 'IconProjectAddOutlineRegular') {
             Assert-True ($bundle.Raw.Contains($marker)) "the bundle does not mention $marker"
         }
         "$($bundle.Raw.Length) bytes"
@@ -492,7 +499,11 @@ try {
         Assert-True ($probe.Status -eq 200) "probe answered HTTP $($probe.Status)"
         Assert-True ($probe.Json.ok -eq $true) 'the probe did not report ok'
         Assert-True ($probe.Json.limits.maxUploadBytes -gt 0) 'the probe reported no upload limit'
-        "limit $([math]::Round($probe.Json.limits.maxUploadBytes / 1MB)) MiB"
+        # Synthetic archives below have to be written in the generation this
+        # deployment writes, so the probe is also how the script learns it.
+        $script:InstalledFormat = [int]$probe.Json.format.installedVersion
+        Assert-True ($script:InstalledFormat -gt 0) "the probe reported format version '$($probe.Json.format.installedVersion)'"
+        "limit $([math]::Round($probe.Json.limits.maxUploadBytes / 1MB)) MiB, session format v$($script:InstalledFormat)"
     }
 
     Write-Step 'Import planning'
@@ -518,6 +529,17 @@ try {
         "$($script:RootId) → $($script:Plan.targetCwd) ($($script:Plan.targetCwdSource))"
     }
 
+    # The sample is an archive from an older DSH, so the plan has to say that its
+    # generation differs from this installation's before anything is written.
+    Test-Case 'the plan reports the archive format against the installed one' {
+        $format = $script:Plan.format
+        Assert-True ($null -ne $format) 'the plan carries no format report'
+        Assert-True ([int]$format.installedVersion -eq $script:InstalledFormat) "the plan reports installed v$($format.installedVersion), the probe said v$($script:InstalledFormat)"
+        Assert-True ([int]$format.archivedVersion -ne $script:InstalledFormat) "the sample archive already matches the installed generation v$($script:InstalledFormat), so this check can no longer prove a migration"
+        Assert-True ($format.migrationRequired -eq $true) 'the plan did not report that a migration is required'
+        "archive v$($format.archivedVersion) → installed v$($format.installedVersion)"
+    }
+
     Write-Step 'Import'
     Test-Case 'the archive imports through the Session services' {
         $import = Import-Archive -Path $Archive
@@ -526,7 +548,13 @@ try {
         Assert-True ($script:Imported.ok -eq $true) "import reported: $($script:Imported.errors -join '; ')"
         Assert-True ($script:Imported.imported.Count -eq $script:Plan.sessions.Count) "imported $($script:Imported.imported.Count) of $($script:Plan.sessions.Count) sessions"
         Assert-True ($script:Imported.errors.Count -eq 0) "errors: $($script:Imported.errors -join '; ')"
-        "$($script:Imported.imported.Count) sessions"
+        Assert-True ([int]$script:Imported.format.migratedSessions -eq $script:Plan.sessions.Count) "the response reports $($script:Imported.format.migratedSessions) migrated logs, the plan has $($script:Plan.sessions.Count)"
+        Assert-True (($script:Imported.warnings -join ' ') -match 'migrated to v') 'no warning explains the format migration'
+        # Every imported session must name the generation it came from, so a
+        # silently untranslated log cannot pass as migrated.
+        $stale = @($script:Imported.imported | Where-Object { $_.migratedFrom -ne $script:Imported.format.archivedVersion })
+        Assert-True ($stale.Count -eq 0) "$($stale.Count) imported session(s) do not name their source generation"
+        "$($script:Imported.imported.Count) sessions, migrated from v$($script:Imported.format.archivedVersion)"
     }
 
     Test-Case 'every imported log is read back by the reader' {
@@ -621,18 +649,22 @@ try {
         New-Item -ItemType Directory -Force -Path $staged | Out-Null
         # Filed under the repository itself, not the archive's workspace, so the
         # `workspace=current` check below has two different cwds to choose from.
+        # The generation is the one this deployment writes, so the archive is a
+        # current export and needs no migration.
         $lines = @(
-            (@{ type = 'session'; version = 3; id = $id; createdAt = 1789352471075; cwd = $repo; isSeeded = $false; delegationDepth = 0 } | ConvertTo-Json -Compress),
+            (@{ type = 'session'; version = $script:InstalledFormat; id = $id; createdAt = 1789352471075; cwd = $repo; isSeeded = $false; delegationDepth = 0 } | ConvertTo-Json -Compress),
             '{"type":"permission/preset","seq":0,"time":1789352471123,"data":{"preset":"workspace-write"}}',
             '{"type":"sandbox/mode","seq":1,"time":1789352471124,"data":{"mode":"workspace-write"}}'
         )
-        Set-Content -LiteralPath (Join-Path $staged 'session.v3.jsonl') -Value $lines -Encoding utf8
+        $logName = "session.v$($script:InstalledFormat).jsonl"
+        Set-Content -LiteralPath (Join-Path $staged $logName) -Value $lines -Encoding utf8
         $zip = Join-Path $syntheticDir 'minimal.zip'
-        Compress-Archive -Path (Join-Path $staged 'session.v3.jsonl') -DestinationPath $zip -Force
+        Compress-Archive -Path (Join-Path $staged $logName) -DestinationPath $zip -Force
         $upload = Import-Archive -InFile $zip
         Assert-True ($upload.Status -eq 200) "upload answered HTTP $($upload.Status): $($upload.Raw)"
         Assert-True ($upload.Json.imported.Count -eq 1) "upload imported $($upload.Json.imported.Count) sessions"
         Assert-True ($upload.Json.verified.Count -eq 1) 'the uploaded session was not verified'
+        Assert-True ([int]$upload.Json.format.migratedSessions -eq 0) "a current archive was migrated ($($upload.Json.format.migratedSessions) logs)"
         $script:SyntheticId = $id
         'uploaded and verified'
     }
@@ -690,13 +722,17 @@ try {
         $id = "session-$([guid]::NewGuid())"
         $staged = Join-Path $syntheticDir 'unknown-event'
         New-Item -ItemType Directory -Force -Path $staged | Out-Null
+        # A writer admits an unknown type (only the reader enforces the
+        # vocabulary), so this log is written and then refused by the read-back,
+        # which is the path that has to roll the files away again.
         $lines = @(
-            (@{ type = 'session'; version = 3; id = $id; createdAt = 1789352471075; cwd = $script:Plan.targetCwd; isSeeded = $false; delegationDepth = 0 } | ConvertTo-Json -Compress),
+            (@{ type = 'session'; version = $script:InstalledFormat; id = $id; createdAt = 1789352471075; cwd = $script:Plan.targetCwd; isSeeded = $false; delegationDepth = 0 } | ConvertTo-Json -Compress),
             '{"type":"future/unknown-event","seq":0,"time":1789352471123,"data":{"whatever":true}}'
         )
-        Set-Content -LiteralPath (Join-Path $staged 'session.v3.jsonl') -Value $lines -Encoding utf8
+        $logName = "session.v$($script:InstalledFormat).jsonl"
+        Set-Content -LiteralPath (Join-Path $staged $logName) -Value $lines -Encoding utf8
         $zip = Join-Path $syntheticDir 'unknown-event.zip'
-        Compress-Archive -Path (Join-Path $staged 'session.v3.jsonl') -DestinationPath $zip -Force
+        Compress-Archive -Path (Join-Path $staged $logName) -DestinationPath $zip -Force
         $response = Import-Archive -InFile $zip
         Assert-True ($response.Status -eq 500) "answered HTTP $($response.Status)"
         Assert-True ($response.Json.imported.Count -eq 0) 'a session the reader refuses was reported as imported'
@@ -749,8 +785,11 @@ try {
                 Write-Host "  devtools on $cdpPort"
                 $uiArgs = @((Join-Path $PSScriptRoot 'verify-ui.mjs'), '--cdp', $cdpPort, '--base', $script:Base, '--token', $token, '--evidence', $evidence)
                 # A fresh browser profile opens the first-run workspace picker, so
-                # tell the leg which workspace owns the imported sessions.
+                # tell the leg which workspace owns the imported sessions — and
+                # which session was imported, so its sidebar row is selected
+                # exactly rather than guessed from its label.
                 $uiArgs += @('--workspace', (Split-Path -Leaf $script:Plan.targetCwd))
+                $uiArgs += @('--session', $script:RootId)
                 if ($ProbeUi) { $uiArgs += @('--probe', 'true') }
                 & node @uiArgs 1> $uiOut 2> $uiErr
                 $uiExit = $LASTEXITCODE
@@ -806,8 +845,13 @@ try {
                         if ($dialog.usesNativeSelect -eq $true) { $problems.Add('the workspace choice is a native select again, whose popup ignores the theme') }
                         foreach ($field in $dialog.fields) {
                             if ($field.contrast -lt 4.5) { $problems.Add("$($field.name): contrast $($field.contrast) between $($field.color) and its composited backdrop") }
+                            # A zero-size field means the probe measured a hidden
+                            # element (the dialog's own file picker), not copy.
+                            if ($field.name -eq 'hostPathInput' -and ($field.width -le 0 -or $field.height -le 0)) {
+                                $problems.Add("$($field.name): measured a $($field.width)x$($field.height) element")
+                            }
                         }
-                        if ($dialog.workspaceItems.Count -lt 3) { $problems.Add("the workspace menu lists $($dialog.workspaceItems.Count) options, expected 3") }
+                        if ($dialog.workspaceItems.Count -ne 3) { $problems.Add("the workspace menu lists $($dialog.workspaceItems.Count) options, expected the 3 policies") }
                         foreach ($item in $dialog.workspaceItems) {
                             if ($item.contrast -lt 4.5) { $problems.Add("workspace option '$($item.label)': contrast $($item.contrast) between $($item.color) and its composited backdrop") }
                             if ($item.clipped -eq $true) { $problems.Add("workspace option '$($item.label)': the label is wider than its box") }
