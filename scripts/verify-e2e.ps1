@@ -231,6 +231,18 @@ function Get-RemoteValue {
     $result.value
 }
 
+# A deployment that mounts a registry *deletion overlay* can produce the reused
+# session id the importer has to survive; one that does not has no tombstone to
+# reproduce, so that case is skipped rather than faked. The overlay's own
+# read-only metadata method is the cheapest way to ask whether it is there.
+function Test-RegistryDeletionOverlay {
+    try {
+        $response = Invoke-Remote -Endpoint 'workspaceRegistry/archivedSessionMetadata'
+        return ($response.Json.result.ok -eq $true)
+    }
+    catch { return $false }
+}
+
 function Import-Archive {
     param(
         [string]$Path,
@@ -706,6 +718,47 @@ try {
         Assert-True ($null -ne $dry.Json.plan.targetCwdFallback) 'the fallback was not explained'
         Assert-True ($dry.Json.plan.targetCwdFallback -match 'no stored cwd') "unhelpful explanation: $($dry.Json.plan.targetCwdFallback)"
         "fallback to $($dry.Json.plan.targetCwd), explained"
+    }
+
+    # A session id can come back to life. An overlay that permanently deletes a
+    # session remembers the id so the registry's header index cannot re-index the
+    # log it just removed — and the importer writes exactly such a reused id when
+    # an archive is imported again. Grouping is decided by that same index, so
+    # the reused log used to be written, verify, and then silently land in
+    # "Ungrouped" with no error anywhere.
+    if (Test-RegistryDeletionOverlay) {
+        Test-Case 'a re-import of a permanently deleted session is filed under its workspace' {
+            $id = "session-$([guid]::NewGuid())"
+            $staged = Join-Path $syntheticDir 'reused-id'
+            New-Item -ItemType Directory -Force -Path $staged | Out-Null
+            $lines = @(
+                (@{ type = 'session'; version = $script:InstalledFormat; id = $id; createdAt = 1789352471075; cwd = $repo; isSeeded = $false; delegationDepth = 0 } | ConvertTo-Json -Compress),
+                '{"type":"permission/preset","seq":0,"time":1789352471123,"data":{"preset":"workspace-write"}}',
+                '{"type":"sandbox/mode","seq":1,"time":1789352471124,"data":{"mode":"workspace-write"}}'
+            )
+            $logName = "session.v$($script:InstalledFormat).jsonl"
+            Set-Content -LiteralPath (Join-Path $staged $logName) -Value $lines -Encoding utf8
+            $zip = Join-Path $syntheticDir 'reused-id.zip'
+            Compress-Archive -Path (Join-Path $staged $logName) -DestinationPath $zip -Force
+
+            $first = Import-Archive -InFile $zip
+            Assert-True ($first.Status -eq 200) "the first import answered HTTP $($first.Status): $($first.Raw)"
+            Assert-True ($first.Json.workspace.grouped -eq $true) "the first import was not grouped: $($first.Json.workspace.reason)"
+
+            # The overlay's permanent delete: it removes the log and remembers the
+            # id, which is what makes the next import a reused id.
+            $deleted = Get-RemoteValue (Invoke-Remote -Endpoint 'workspaceRegistry/deleteSession' -Args @{ sessionId = $id }) 'workspaceRegistry/deleteSession'
+            Assert-True ($deleted.deleted -eq $true) 'the permanent delete did not report success'
+
+            $again = Import-Archive -InFile $zip
+            Assert-True ($again.Status -eq 200) "the re-import answered HTTP $($again.Status): $($again.Raw)"
+            Assert-True ($again.Json.alreadyImported -ne $true) 'the re-import found nothing to do'
+            Assert-True ($again.Json.workspace.grouped -eq $true) "the re-import was not filed under its workspace: $($again.Json.workspace.reason)"
+            "reused $id after a permanent delete, filed under $($again.Json.workspace.path)"
+        }
+    }
+    else {
+        Write-Host "  skipped: this deployment mounts no registry deletion overlay (workspaceRegistry/deleteSession)" -ForegroundColor Yellow
     }
 
     Test-Case 'a non-ZIP body is refused with 400' {

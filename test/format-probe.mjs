@@ -15,6 +15,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readZipEntries } from '../src/zip.js'
 import { buildImportPlan, classifyArchive } from '../src/archive.js'
@@ -63,8 +64,30 @@ if (install === undefined) {
 /** Import one installed package by absolute path. */
 const load = (relative) => import(pathToFileURL(path.join(install, relative)).href)
 
-const catalogPackage = await load('dsh-session-format-catalog/lib/index.js')
-const factsPackage = await load('dsh-session-format-v3-to-v4/lib/index.js')
+/**
+ * Import one installed package.
+ *
+ * The catalog's *own* scope is asked first: a pnpm installation nests a
+ * package's dependencies under it, so `dsh-session-format-v3-to-v4` lives in
+ * `dsh-session-format-catalog/node_modules` and is not reachable from the
+ * installation root the flat fallback names. The fallback keeps an npm-style,
+ * hoisted installation working.
+ * @param anchorFile - a file inside the scope to resolve from.
+ * @param specifier - exact package name.
+ * @param fallbackRelative - path under the install root, for a hoisted tree.
+ * @returns the module namespace.
+ */
+async function loadInstalled(anchorFile, specifier, fallbackRelative) {
+  try {
+    return await import(pathToFileURL(createRequire(anchorFile).resolve(specifier)).href)
+  } catch {
+    return load(fallbackRelative)
+  }
+}
+
+const catalogEntry = path.join(install, 'dsh-session-format-catalog', 'lib', 'index.js')
+const catalogPackage = await loadInstalled(catalogEntry, '@deepseek-ai/dsh-session-format-catalog', 'dsh-session-format-catalog/lib/index.js')
+const factsPackage = await loadInstalled(catalogEntry, '@deepseek-ai/dsh-session-format-v3-to-v4', 'dsh-session-format-v3-to-v4/lib/index.js')
 const { sessionFormatCatalog, historicalSessionFormatCatalog, createSessionFormatCatalogWithChildren } = catalogPackage
 const { historicalChildCatalogSource } = factsPackage
 const { currentVersion } = sessionFormatCatalog

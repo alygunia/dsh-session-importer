@@ -197,4 +197,31 @@ The membership/grouping conclusions above still hold — list membership is stil
 
 Resolution note for a plugin that wants the format library: DSH routes a bare `@deepseek-ai/*` specifier to the running installation only for modules it scopes, so a plugin mounted by absolute path (a `link:` dependency resolved through the profile is scoped; this project's verification overlay is not) has to fall back to resolving from `process.argv[1]` — the `dsh` entry script inside the installation — which reaches the same copy (`dsh-app-boot/lib/index.js:1386-1419, 1471-1510`).
 
+## Update: this profile's plugin set patches the registry (why a re-import landed in "Unrouped")
+
+`@michengai/dsh-archive-manager` (installed in `profile web`) does not merely *use* `ctx.workspaceRegistry` — it rewrites the live instance in place (`lib/workspace.js`, `installArchiveWorkspace(registry)`): every method of its `ArchiveWorkspaceRegistry` subclass is copied onto the real registry object, `protectArchivedSessionPath` wraps `registry.host.sessionPath`, and its `deleteSession`/`deleteArchivedSessions` remotes are registered on the `workspaceRegistry` namespace. Two of those pieces change what an importer can rely on.
+
+1. **A deletion tombstone makes the id un-indexable for the process lifetime.** `deleteSessionCore` removes the log, then `forgetIndexedSession(id)` clears the parent's `headers` / `sessionPaths` / `invalidSessionPaths` entries and records the id in `deletedSessionIds` with its identity (`createdAt`, `cwd`). From then on the copied `indexHeader` returns early for that id:
+   ```js
+   async indexHeader(header) {
+       if (this.deletedSessionIds.has(header.id)) return;   // ← skips ANY log with that id
+       return super.indexHeader(header);
+   }
+   ```
+   The skip is *identity-blind*, while the overlay's own reuse path (`sessionKnown` → `coldReuseKnown`) only forgives an id when the listed log's identity differs from the deleted one. Nothing else ever clears `deletedSessionIds`.
+
+2. **`attachSession` reads the header through that index.** `WorkspaceEntity.attachSession` (`dsh-workspace/lib/types/entity.js:57-89`) starts with `host.readSessionHeader(id)` — not live, not cached, a fresh `listStoredHeaders()` → `indexHeaders()` → the skipped `indexHeader` → `headers.get(id) === undefined` → `throw new Error("cannot validate session '<id>': session persistence holds no such session")`. The registry therefore refuses to file a log that is on disk and readable. The importer catches that (grouping is best effort) and the session stays in "Ungrouped".
+
+Consequences for this plugin (all now handled in `src/index.js`):
+
+- **Re-import after a delete is the recommended flow, and it is exactly the poisoned case.** The dialog tells the user to delete a session and import again to file it elsewhere; the re-import writes the *same* id. Before attaching, the importer now calls the deployment's own forget-hook (`clearTombstone`, duck-typed, called only when present), which drops the tombstone and the projection-cache tombstone, so the header indexes and the attach validates.
+- **`attachSession` can also resolve without writing anything.** The registry prunes ids it cannot index inside its `update` chain, so a "successful" attach can leave the record unchanged. Membership is now read back from `workspace.sessionIds` and reported as a failure with the registry's state instead of as success.
+- **There is no official session delete in 0.2.0-rc.2.** `dsh-api-session-controller/lib/typert.remote-client.d.ts` lists `session/{attachment,cancel,create,fork,list,page,projection,rename,search,selectModel,prompt,…}` and no delete; the only delete in this profile is the overlay's `workspaceRegistry/deleteSession`. So a deleted session in this deployment is always a tombstoned one.
+
+Live evidence for the diagnosis (this machine, 2026-10-19): the user's import of `dsh-session-session-b631e372….zip` (archive `cwd: E:\Project\virtual_cell`, which no longer exists) ended up in `sessions/--E-Project-Research--/session-b631e372….jsonl.zstd` with `cwd: E:\Project\Research` — a workspace that *does* exist and *is* registered — while `storages/workspace.json` never listed that id and its `Research` record was last written two minutes earlier. A control import of a fresh synthetic archive against the same target workspace grouped correctly, and an earlier copy of the same archive had been deleted out of `--E-Project-virtual_cell--` (that directory's mtime), which is what creates the tombstone.
+
+### Resolution ladder, second edition (pnpm nests the format edges)
+
+In this installation `@deepseek-ai/dsh-session-format-v3-to-v4` is **not** at `dsh/node_modules/@deepseek-ai/`; it exists only inside `dsh-session-format-catalog/node_modules/@deepseek-ai/`, so no anchor outside the catalog package can resolve it — `createRequire(argv[1]).resolve(...)` reaches the catalog but not the edges, and the plugin's first ladder therefore found the catalog and lost the edges (`installed v(unknown)` in the live route's dry run). `src/format.js` now resolves the catalog first and offers *its* resolved files as extra anchors for the edge packages, which is the scope the catalog itself imports them from. Verified against this installation: `installedFormatVersion()` → 4 and `describeFormat` → `{ archivedVersion: 3, installedVersion: 4, migrationRequired: true }`. Without it, `migratePlan` fell back to "write as exported" and the writer then refused the v3 header (`encodeCurrent requires Session format v4`), i.e. no pre-v4 archive could be imported at all.
+
 Nothing was modified in the DSH installation.

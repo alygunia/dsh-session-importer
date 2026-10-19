@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
       'dialog.attachments': '附件：',
       'dialog.group': '工作区分组：',
       'dialog.groupNone': '未归入工作区（显示在“未分组”）',
+      'dialog.groupNoneReason': '原因：',
       'dialog.networkFailed': '导入请求失败：',
       'dialog.invalidFile': '请选择 .zip 文件。',
     }
@@ -125,6 +126,7 @@ window.__ModuleLoader__.load({
       'dialog.attachments': 'Attachments: ',
       'dialog.group': 'Workspace group: ',
       'dialog.groupNone': 'not filed under a workspace (grouped as "Ungrouped")',
+      'dialog.groupNoneReason': 'Reason: ',
       'dialog.networkFailed': 'Import request failed: ',
       'dialog.invalidFile': 'Choose a .zip file.',
     }
@@ -648,11 +650,17 @@ window.__ModuleLoader__.load({
         if (result.alreadyImported === true || importedCount === 0) summaryLines.push(t('dialog.alreadyPresent'))
         else summaryLines.push(`${t('dialog.done')} — ${importedCount}`)
         // The workspace line says what happened, not just where: an existing
-        // session cannot be moved between workspaces, and a "current workspace"
-        // that could not be resolved is reported as the fallback it is.
+        // session cannot be moved between workspaces, a "current workspace" that
+        // could not be resolved is reported as the fallback it is, and a session
+        // the registry refused to account for says why instead of leaving the
+        // row in "Ungrouped" with no explanation.
         if (workspace.grouped === true) summaryLines.push(`${t('dialog.group')}${workspace.path}`)
         else if (workspace.unchanged === true) summaryLines.push(t('dialog.workspaceUnchanged'))
         else if (result.plan && result.plan.targetCwdSource === 'process') summaryLines.push(`${t('dialog.workspaceFallback')}${result.plan.targetCwd}`)
+        else if (typeof workspace.reason === 'string' && workspace.reason !== '') {
+          summaryLines.push(`${t('dialog.group')}${t('dialog.groupNone')}`)
+          summaryLines.push(`${t('dialog.groupNoneReason')}${workspace.reason}`)
+        }
         else summaryLines.push(`${t('dialog.group')}${t('dialog.groupNone')}`)
         if (result.attachments) {
           const restored = result.attachments.restored || 0

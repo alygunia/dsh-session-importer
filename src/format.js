@@ -59,9 +59,10 @@ function messageOf(error) {
  * directory, whose `node_modules` is where a global installation lives. A
  * directory anchor gets a filename inside it, because Node computes a
  * `node_modules` lookup from the anchor's *parent*.
+ * @param extraAnchors - anchors tried before the standing ladder.
  * @returns absolute candidate filenames.
  */
-function resolutionAnchors() {
+function resolutionAnchors(extraAnchors = []) {
   const anchors = []
   const push = (value) => {
     if (typeof value !== 'string' || value === '') return
@@ -73,7 +74,31 @@ function resolutionAnchors() {
   for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
     if (dir !== '') push(path.join(dir, '.dsh-resolution-anchor.js'))
   }
-  return anchors
+  return [...extraAnchors, ...anchors]
+}
+
+/**
+ * Every file one specifier resolves to along the standing ladder.
+ *
+ * Used to reach a package that is *nested* under another one — a pnpm
+ * installation keeps a dependency's own dependencies out of the top level, so
+ * `@deepseek-ai/dsh-session-format-v3-to-v4` exists only inside
+ * `@deepseek-ai/dsh-session-format-catalog/node_modules`, and the catalog is
+ * exactly the scope whose copy the installed catalog itself imports.
+ * @param specifier - exact package name to resolve.
+ * @returns absolute resolved filenames, in preference order.
+ */
+function resolutionFiles(specifier) {
+  const found = []
+  for (const anchor of resolutionAnchors()) {
+    try {
+      const resolved = createRequire(anchor).resolve(specifier)
+      if (!found.includes(resolved)) found.push(resolved)
+    } catch {
+      // Not resolvable from this anchor: the normal case for most of them.
+    }
+  }
+  return found
 }
 
 /**
@@ -84,10 +109,11 @@ function resolutionAnchors() {
  * an anchor inside the installation and imports the file Node picks, so a
  * plugin mounted by path reaches the same code.
  * @param specifier - exact package name to load.
+ * @param extraAnchors - further anchors to resolve from, tried first.
  * @returns the module namespace.
  * @throws {FormatError} when no anchor resolves it.
  */
-async function importInstalled(specifier) {
+async function importInstalled(specifier, extraAnchors = []) {
   let bareReason = 'no literal importer is registered for it'
   const bare = IMPORTERS.get(specifier)
   if (bare !== undefined) {
@@ -97,7 +123,7 @@ async function importInstalled(specifier) {
       bareReason = messageOf(error)
     }
   }
-  const anchors = resolutionAnchors()
+  const anchors = resolutionAnchors(extraAnchors)
   for (const anchor of anchors) {
     let resolved
     try {
@@ -135,7 +161,14 @@ function loadSupport() {
   if (supportPromise === undefined) {
     supportPromise = (async () => {
       const catalog = await importInstalled(CATALOG_PACKAGE)
-      const facts = await importInstalled(CHILD_FACTS_PACKAGE)
+      // The historical edge packages are dependencies *of the catalog*, and a
+      // pnpm installation keeps them nested inside it rather than at the top
+      // level, so the standing ladder resolves the catalog but never the edges.
+      // Every catalog copy the ladder can see is offered as an anchor for the
+      // edges: that is the scope whose copy the catalog itself imports, so the
+      // migration runs on exactly the codecs the installation reads with.
+      const catalogAnchors = resolutionFiles(CATALOG_PACKAGE)
+      const facts = await importInstalled(CHILD_FACTS_PACKAGE, catalogAnchors)
       const { sessionFormatCatalog, historicalSessionFormatCatalog, createSessionFormatCatalogWithChildren } = catalog
       const { historicalChildCatalogSource } = facts
       if (typeof sessionFormatCatalog?.currentVersion !== 'number'

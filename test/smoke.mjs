@@ -112,7 +112,10 @@ let plan
 check('reads every entry of a real export', () => {
   entries = readZipEntries(bytes)
   assert.ok(entries.size >= 3, `expected several entries, got ${entries.size}`)
-  assert.ok(entries.has('session.v3.jsonl'), 'root log entry is missing')
+  // The export names the root log after the generation it holds, so the check
+  // asserts the *shape* rather than one generation's filename.
+  const rootEntry = [...entries.keys()].find((name) => /^session(\.v\d+)?\.jsonl$/u.test(name))
+  assert.ok(rootEntry !== undefined, 'root log entry is missing')
 })
 
 check('classifies root, subagents, and media', () => {

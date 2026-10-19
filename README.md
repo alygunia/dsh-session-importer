@@ -144,10 +144,22 @@ archive's generation, the installed one, and whether a migration happened.
   event vocabulary and replay invariants. A log this build cannot interpret
   (for example an archive from a newer harness) fails loudly and its files are
   removed again, so a broken session never lands in the sidebar.
-- **Grouping is best effort.** The root session is filed under its workspace
-  through `ctx.workspaceRegistry`. If the workspace record cannot be written or
-  the archived cwd no longer exists locally, the session is still imported and
-  visible — it simply groups under "Ungrouped", and the dialog says so.
+- **Grouping is best effort — and says why when it fails.** The root session is
+  filed under its workspace through `ctx.workspaceRegistry`. If the workspace
+  record cannot be written or the archived cwd no longer exists locally, the
+  session is still imported and visible — it groups under "Ungrouped" and the
+  dialog prints the registry's own reason, because the registry can also drop
+  the membership silently. Membership is read back after the attach, so "the
+  registry wrote nothing" never passes for success.
+- **An id that was permanently deleted can be imported and filed again.** A
+  plugin that deletes sessions can leave a *tombstone* for the id (the shipped
+  `@michengai/dsh-archive-manager` does), making the registry's header index
+  refuse to re-index it — that is how it stops a stale `list()` from
+  resurrecting a log it just removed. Re-importing after a delete is exactly
+  the flow this plugin's own dialog recommends, so the log it writes carries
+  such a reused id: before filing, the import asks the deployment's own
+  forget-hook (`clearTombstone`, called only when it exists) to drop the stale
+  tombstone.
 
 ### What is *not* restored
 
@@ -274,6 +286,12 @@ filesystem and report what changed.
   there is nothing to resolve, and the host falls back to its own working
   directory — which the response and the dialog both report, because that
   directory decides the group.
+- **A deletion overlay can change what "import again" means.** The
+  delete-and-re-import route assumes the id is clean once the log is gone. A
+  plugin that keeps a tombstone for deleted ids is asked to forget it (see
+  [Guarantees](#guarantees)); when the mounted registry offers no such hook, or
+  hides ids some other way, grouping fails and the dialog shows the registry's
+  own message instead of an unexplained "Ungrouped".
 - **The header menu item depends on another plugin's markup.** It is injected
   into the Session-log export plugin's menu (see
   [The header menu item](#the-header-menu-item)), so a release that changes that
@@ -285,7 +303,9 @@ filesystem and report what changed.
 No build step: `src/index.js` is the host half, `src/client.js` is the browser
 half as a classic `window.__ModuleLoader__.load` bundle, `src/format.js` is the
 only part that imports anything beyond Node built-ins (it loads the running
-installation's session-format library by resolved path), and the ZIP reader in
+installation's session-format library by resolved path — the catalog first, then
+the historical edge packages *from the catalog's own scope*, because a pnpm
+installation nests them under it), and the ZIP reader in
 `src/zip.js` is a deliberate ~150-line central-directory parser so the package
 needs no dependency install in a profile.
 

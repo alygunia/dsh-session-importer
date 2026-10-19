@@ -355,6 +355,32 @@ function findSessionDirectories(config, sessionId) {
 }
 
 /**
+ * Forget any deletion tombstone the mounted registry keeps for one session id.
+ *
+ * The registry's header index is append-only for the life of the process, so a
+ * plugin that deletes a session has to stop a later `list()` from indexing the
+ * log it just removed. The shipped `@michengai/dsh-archive-manager` overlay
+ * does that by remembering the deleted id and making `indexHeader` skip it —
+ * which also skips a *new* log that legitimately reuses the id. The id this
+ * import just wrote is new (the plan only wrote logs whose id held no stored
+ * session), so the tombstone is stale by construction and the deployment's own
+ * hook for saying so is asked for by name. Absent that hook — every profile
+ * without such an overlay — this is a no-op.
+ * @param registry - the mounted workspace registry.
+ * @param sessionId - the session that was just written.
+ * @returns nothing; a refusing hook costs no more than an absent one.
+ */
+function forgetDeletionTombstone(registry, sessionId) {
+  if (typeof registry.clearTombstone !== 'function') return
+  try {
+    registry.clearTombstone(sessionId)
+  } catch {
+    // A hook that refuses is no worse than a hook that is absent: the attach
+    // below then reports whatever the registry itself says.
+  }
+}
+
+/**
  * File the imported root session under its workspace group.
  *
  * Session-list membership comes from a persistence directory scan, so an
@@ -363,6 +389,14 @@ function findSessionDirectories(config, sessionId) {
  * canonical-cwd contract, and no RPC exposes session attachment, so this runs
  * in-process against `ctx.workspaceRegistry` and stays best-effort: an
  * unwritable workspace record must never undo a completed import.
+ *
+ * Two failures are quiet enough to be mistaken for success, so both are
+ * answered explicitly rather than assumed: the registry can hold a deletion
+ * tombstone for the id (see {@link forgetDeletionTombstone}), and
+ * `attachSession` resolves without a word when its write chain then prunes the
+ * id it was given — the durable record is written but the entity's own
+ * membership getter hides it, so the caller reads membership back instead of
+ * trusting the promise.
  * @param ctx - host context.
  * @param cwd - the cwd stamped on the imported root header.
  * @param sessionId - the imported root session.
@@ -373,9 +407,17 @@ async function attachToWorkspace(ctx, cwd, sessionId) {
   if (registry === undefined || typeof registry.resolveByPath !== 'function' || typeof registry.create !== 'function') {
     return { grouped: false, reason: 'this profile mounts no workspace registry, so the session is grouped under "Ungrouped"' }
   }
+  forgetDeletionTombstone(registry, sessionId)
   try {
     const workspace = (await registry.resolveByPath(cwd)) ?? (await registry.create(cwd))
     await workspace.attachSession(sessionId)
+    const accounted = Array.isArray(workspace.sessionIds) && workspace.sessionIds.includes(sessionId)
+    if (!accounted) {
+      return {
+        grouped: false,
+        reason: `the workspace registry wrote no membership for session "${sessionId}" under "${workspace.path}", so the session is grouped under "Ungrouped"`,
+      }
+    }
     return { grouped: true, workspaceId: String(workspace.id), path: workspace.path }
   } catch (error) {
     return { grouped: false, reason: `could not file the session under "${cwd}": ${messageOf(error)}` }
