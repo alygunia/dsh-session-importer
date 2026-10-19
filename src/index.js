@@ -671,15 +671,36 @@ export function apply(ctx, config = CONFIG_DEFAULTS) {
   else ctx.inject(['connection'], (sub) => registerRoute(sub))
 
   const registerTool = (toolCtx) => {
+    /**
+     * The session on whose behalf this tool call runs.
+     *
+     * The dialog gets "the workspace of the session you have open" from the
+     * browser; a model call has no dialog, so the caller *is* the importing
+     * session. Without it the `auto` policy has nothing to resolve and the Host
+     * falls back to its own launch directory — the process cwd, which is
+     * routinely not the workspace the user is looking at.
+     * @param exec - the tool run context.
+     * @returns the calling session id, when it can be determined.
+     */
+    const callingSessionId = (exec) => {
+      const fromRun = exec?.agent?.id
+      if (typeof fromRun === 'string' && fromRun !== '') return fromRun
+      try {
+        const initiator = ctx.get('agents')?.currentInitiator?.()
+        return typeof initiator?.id === 'string' && initiator.id !== '' ? initiator.id : undefined
+      } catch {
+        return undefined
+      }
+    }
     toolCtx.effect(() => toolCtx.tools.register({
       name: 'import_session_archive',
-      description: 'Import a Session-log ZIP previously exported from DSH (the `dsh-session-<id>.zip` download) into this deployment. Restores the root session, every subagent session, and the referenced attachments, preserving their session ids. Use dry_run to inspect an archive without importing it.',
+      description: 'Import a Session-log ZIP previously exported from DSH (the `dsh-session-<id>.zip` download) into this deployment. Restores the root session, every subagent session, and the referenced attachments, preserving their session ids. Without `cwd` the import is filed under this session\'s workspace when the archived directory no longer exists. Use dry_run to inspect an archive without importing it.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Absolute host path of the session-log ZIP to import.' },
           dry_run: { type: 'boolean', description: 'Inspect the archive and report the plan without importing it.' },
-          cwd: { type: 'string', description: 'Absolute workspace path to file the imported sessions under. Omit for the deployment default.' },
+          cwd: { type: 'string', description: 'Absolute workspace path to file the imported sessions under. Omit to use the archived workspace when it still exists locally, otherwise this session\'s workspace.' },
         },
         required: ['path'],
         additionalProperties: false,
@@ -688,10 +709,14 @@ export function apply(ctx, config = CONFIG_DEFAULTS) {
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }],
       },
-      async execute(args) {
+      async execute(args, exec) {
         const query = new URLSearchParams({ path: String(args.path) })
         if (args.dry_run === true) query.set('dryRun', 'true')
         if (typeof args.cwd === 'string' && args.cwd !== '') query.set('cwd', args.cwd)
+        else {
+          const sessionId = callingSessionId(exec)
+          if (sessionId !== undefined) query.set('sessionId', sessionId)
+        }
         const request = new Request(`http://dsh.internal${SESSION_IMPORT_PATH}?${query.toString()}`, { method: 'GET' })
         try {
           const { payload } = await runImport(ctx, request, config)

@@ -249,7 +249,12 @@ from the page (or from the dialog) rather than from a bare shell.
 
 The plugin also registers `import_session_archive` (`path`, optional `dry_run`,
 optional `cwd`), so the agent can import an archive it can see on the host
-filesystem and report what changed.
+filesystem and report what changed. A model call has no dialog to pick a
+workspace, so the **calling session is the importing session**: with no `cwd`
+the import is filed exactly as the dialog would file it — the archived workspace
+when that directory still exists locally, otherwise the calling session's own
+workspace. The Host process's launch directory is only the last resort, and the
+dry run names which one it used.
 
 ## Limits
 

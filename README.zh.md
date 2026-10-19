@@ -148,7 +148,7 @@ curl -X POST --data-binary @dsh-session-x.zip -H 'content-type: application/zip'
 
 ## 模型工具
 
-插件同时注册了 `import_session_archive`（`path`，可选 `dry_run`，可选 `cwd`），因此 agent 可以导入它在主机文件系统上看得见的归档，并汇报改动了什么。
+插件同时注册了 `import_session_archive`（`path`，可选 `dry_run`，可选 `cwd`），因此 agent 可以导入它在主机文件系统上看得见的归档，并汇报改动了什么。模型调用没有对话框可以选工作区，所以**发起调用的那个会话就是导入者**：不传 `cwd` 时，归组规则与对话框完全一致——归档里的工作区在本机仍存在就用它，否则用发起会话自己的工作区；主机启动目录只是最后兜底，dry run 会说明用的是哪一条。
 
 ## 限制
 
