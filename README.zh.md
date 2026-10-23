@@ -6,7 +6,18 @@
 
 归档格式就是 `@deepseek-ai/dsh-session-log-export` 产出的那一种（会话标题栏「更多操作」里的 **Download session log**，或 `/export` 命令）：`dsh-session-<id>.zip`。由*旧版* DSH 导出的归档会在导入时迁移到已装的会话格式，所以一次下载在升级之后依然可用。
 
-插件跟随已部署的 harness，而不是钉死某个版本：主机半边只用长期稳定的 Session 服务契约，浏览器半边优先使用当前 primitives 的图标名，同时也接受旧名。它需要安装提供的那两样东西都是「用不到就降级并报告」，而不是假定存在——会话格式库（凡挂载了 JSONL persistence 后端的地方都有）与会话列表上的 `retainedBy.mainView`，后者正是 shell 自己用来判定「哪个会话是打开着的」的依据。见 `format.migrationUnavailable` 与对话框里工作区的回退说明。
+插件跟随已部署的 harness，而不是钉死某个版本：主机半边只用长期稳定的 Session 服务契约，浏览器半边使用当前 primitives 的图标名。它需要安装提供的那两样东西都是「用不到就降级并报告」，而不是假定存在——会话格式库（凡挂载了 JSONL persistence 后端的地方都有）与会话列表上的 `retainedBy.mainView`，后者正是 shell 自己用来判定「哪个会话是打开着的」的依据。见 `format.migrationUnavailable` 与对话框里工作区的回退说明。
+
+### 兼容性
+
+在 `@deepseek-ai/dsh` **0.2.1-rc.2**（会话格式第 4 代）上验证通过。
+
+| DSH | 状态 |
+|---|---|
+| 0.2.1-rc.2 | 已验证——当前目标版本 |
+| 0.2.0-rc.2 | 此前已验证；浏览器半边改为通过 `uiWorkspace.openSession()` 打开导入的会话，这两个版本都提供该接口 |
+
+两个版本之间上游动过的细节都已处理：会话列表快照不再带 `current` 字段（打开着的会话改从 `retainedBy.mainView` 读），图标也去掉了旧的按尺寸命名的别名。对话框里的 **打开会话** 按钮现在请工作区 façade 把导入的会话显示出来——DSH 0.2.x 的 `ISessions` 上并没有 `open()`，所以先前那道 `typeof service.open === 'function'` 的守卫其实什么也没做。
 
 ## 安装
 
@@ -34,7 +45,9 @@ dsh plugin --profile web add E:/Project/dsh-ext/dsh-session-importer
 | 会话标题栏 → 更多操作菜单 | **导入会话**，紧跟在 **下载 Session 日志** 下面 |
 | 侧边栏底部 | **导入会话**（始终可用；栏折叠时收成一个图标） |
 
-标题栏那个入口就在 session-log 导出插件自己的菜单里，所以「导出/导入」读起来是一对动作。那个菜单用字面量 items 数组渲染，没给其他插件留任何挂载点，因此这一项是**注入到已渲染的菜单 DOM** 里的（见[标题栏菜单项](#标题栏菜单项)）；侧边栏那个入口不需要这种配合，在任何组装下都在。
+标题栏那个入口就在 session-log 导出插件自己的菜单里，所以「导出/导入」读起来是一对动作。那个菜单用字面量 items 数组渲染，因此这一项是**注入到已渲染的菜单 DOM** 里的（见[标题栏菜单项](#标题栏菜单项)）；侧边栏那个入口不需要这种配合，在任何组装下都在。
+
+DSH 0.2.1 确实提供了一个面向会话标题栏条目的正式槽位 `conversation.session.header.utilities`，导出插件自己也注册了进去。但注册进去的条目会渲染成标题栏里**独立的一格**，而不是「更多操作」菜单里的一项，所以它替代不了这个菜单项——要「紧挨着下载动作」，仍然只能靠下面说的注入。
 
 对话框里：
 
@@ -46,7 +59,7 @@ dsh plugin --profile web add E:/Project/dsh-ext/dsh-session-importer
 
 ### 标题栏菜单项
 
-`@deepseek-ai/dsh-session-log-export` 用字面量 `items` 数组渲染会话标题栏的「更多操作」菜单，因此没有 slot、service 或钩子可供其他插件添加条目。导入项于是改成在该菜单打开时注入其 DOM：
+`@deepseek-ai/dsh-session-log-export` 用字面量 `items` 数组渲染会话标题栏的「更多操作」菜单，导入项于是改成在该菜单打开时注入其 DOM：
 
 - 注入节点是**下载项的克隆**，所以无需知道任何哈希类名，就能继承原生菜单项的 class、hover 效果与不依赖语言的排版；
 - 菜单的键盘导航实时遍历 `button:not(:disabled)`，注入的按钮因此自动进入键盘模型；

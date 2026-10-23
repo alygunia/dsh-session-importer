@@ -5,11 +5,14 @@
 //   the Session header's more-actions menu   an item beside "Download session log"
 //
 // That menu belongs to `@deepseek-ai/dsh-session-log-export`, which renders its
-// items from a literal array — there is no slot or contribution point for a
-// second plugin to add one — so the import item is injected into the menu's DOM
-// (see `watchMoreMenu`). It is the only way to sit *next to* the download
-// action rather than beside it, and the sidebar entry stays as the entry point
-// for compositions that do not mount that plugin.
+// items from a literal array, so the import item is injected into the menu's
+// DOM (see `watchMoreMenu`). DSH 0.2.1 does expose a first-class slot for
+// header entries (`conversation.session.header.utilities`) that the export
+// plugin itself uses — but an entry registered there renders as its own cell
+// in the header, not *inside* the more-actions menu. Injection therefore stays
+// the only way to sit next to the download action rather than beside it, and
+// the sidebar entry remains the entry point for compositions that do not mount
+// that plugin.
 //
 // The dialog reads a `dsh-session-<id>.zip` download (file picker or drop) —
 // or a host path for a deployment that keeps archives on the server — and
@@ -34,11 +37,10 @@ window.__ModuleLoader__.load({
       Modal, Button, Input, Menu,
     } = primitives
     // The primitives renamed their icons from a size suffix to a weight suffix
-    // (`IconProjectAddOutline16` → `…Regular`); both names carry the same
-    // artwork, so the newer one is preferred and the older one keeps this half
-    // working on a 0.1.x shell.
-    const ProjectAddIcon = primitives.IconProjectAddOutlineRegular ?? primitives.IconProjectAddOutline16
-    const ChevronDownIcon = primitives.IconChevronDownOutlineRegular ?? primitives.IconChevronDownOutline14
+    // (`IconProjectAddOutline16` → `…Regular`). DSH 0.2.1 removed the old
+    // aliases altogether, so only the current names are looked up.
+    const ProjectAddIcon = primitives.IconProjectAddOutlineRegular
+    const ChevronDownIcon = primitives.IconChevronDownOutlineRegular
     if (ProjectAddIcon === undefined || ChevronDownIcon === undefined) {
       // A shell whose primitives export neither name would render
       // `createElement(undefined)` and crash the whole contribution, so the
@@ -265,6 +267,7 @@ window.__ModuleLoader__.load({
     // the current services even when they arrived after `apply` ran.
     let sessionsService
     let localeService
+    let workspaceService
 
     /** Browser-language fallback used when no locale service is mounted. */
     function fallbackLanguage() {
@@ -489,7 +492,6 @@ window.__ModuleLoader__.load({
       if (!service) return
       try {
         if (typeof service.refresh === 'function') await service.refresh()
-        else if (typeof service.refreshList === 'function') await service.refreshList()
       } catch {
         // A failed refresh only means the row appears after the next reload.
       }
@@ -500,18 +502,18 @@ window.__ModuleLoader__.load({
      * `workspace=current` resolves to *this* session's workspace on the Host
      * instead of falling back to the Host process's own working directory.
      *
-     * There is no single field for "the open session". Older list snapshots
-     * carried `current` directly; the current shell drops that field and defines
-     * the open session as the one its main view is holding — the same rule
-     * `UiSession` applies to pick its own Session binding (`retainedBy.mainView
-     * > 0`), read here through the public list snapshot.
+     * There is no single field for "the open session". The list snapshot dropped
+     * the old `current` field (DSH 0.2.1: `SessionListState` is
+     * `{ ids, byId, phase, projectionsBySession }`), and the open session is
+     * defined instead by local retention — the same rule `UiSession` applies to
+     * pick its own Session binding (`retainedBy.mainView > 0`), read here
+     * through the public list snapshot.
      * @returns the current session id, or undefined when nothing is selected.
      */
     function currentSessionId() {
       try {
         const snapshot = sessionsService && sessionsService.list ? sessionsService.list.getSnapshot() : undefined
         if (snapshot === undefined || snapshot === null) return undefined
-        if (typeof snapshot.current === 'string' && snapshot.current !== '') return snapshot.current
         const rows = snapshot.byId
         if (rows === undefined || rows === null) return undefined
         const ids = Array.isArray(snapshot.ids) ? snapshot.ids : Object.keys(rows)
@@ -630,10 +632,17 @@ window.__ModuleLoader__.load({
 
       const openImported = useCallback(() => {
         const id = result && result.rootSessionId
-        const service = sessionsService
-        if (id && service && typeof service.open === 'function') {
+        if (id) {
+          // Navigation belongs to the view owner: the session service only
+          // reports the catalog, and the workspace facade is what opens a
+          // Session. (`ISessions.open()` does not exist in DSH 0.2.x — the
+          // button was a no-op there. Shells that do expose it are still
+          // honoured, so this half stays usable on older ones.)
+          const workspace = workspaceService
+          const service = sessionsService
           try {
-            service.open(id)
+            if (workspace && typeof workspace.openSession === 'function') workspace.openSession(id)
+            else if (service && typeof service.open === 'function') service.open(id)
           } catch {
             // The row may need a reload before it is addressable.
           }
@@ -864,6 +873,15 @@ window.__ModuleLoader__.load({
           sessionsService = sub.sessions
         })
       }
+      // The session service only reports the catalog — DSH 0.2.x has no
+      // `ISessions.open()` at all, so navigation belongs to the view owner.
+      // The workspace facade is what opens a Session for the user.
+      workspaceService = ctx.get('uiWorkspace')
+      if (!workspaceService) {
+        ctx.inject(['uiWorkspace'], (sub) => {
+          workspaceService = sub.uiWorkspace
+        })
+      }
       adoptLocale(ctx.get('locale'), ctx)
       if (!localeService) {
         ctx.inject(['locale'], (sub) => adoptLocale(sub.locale, ctx))
@@ -886,7 +904,8 @@ window.__ModuleLoader__.load({
       ctx.on('locale/change', refreshInjectedLabel)
     }
 
-    // `slots` gates apply(); the sessions and locale services are optional.
+    // `slots` gates apply(); the sessions, locale and workspace services are
+    // optional and are picked up whenever they show up.
     return { apply, inject: ['slots'] }
   },
 })

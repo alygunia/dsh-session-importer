@@ -15,12 +15,29 @@ installed session format on import, so a download stays usable across upgrades.
 
 The plugin follows the deployed harness rather than pinning one release: the
 host half uses only the long-standing Session service contracts, and the browser
-half prefers the current primitives' icon names while still accepting the older
-ones. The two things it needs from the installation are used defensively and
-reported when missing rather than assumed — the session-format library (present
-wherever the JSONL persistence backend is mounted) and the session list's
-`retainedBy.mainView`, which is how the shell itself decides which session is
-open. See `format.migrationUnavailable` and the dialog's workspace fallback line.
+half uses the primitives' current icon names. The two things it needs from the
+installation are used defensively and reported when missing rather than assumed
+— the session-format library (present wherever the JSONL persistence backend is
+mounted) and the session list's `retainedBy.mainView`, which is how the shell
+itself decides which session is open. See `format.migrationUnavailable` and the
+dialog's workspace fallback line.
+
+### Compatibility
+
+Verified against `@deepseek-ai/dsh` **0.2.1-rc.2** (session format generation 4).
+
+| DSH | Status |
+|---|---|
+| 0.2.1-rc.2 | verified — the current target |
+| 0.2.0-rc.2 | verified earlier; the browser half opens the imported Session through `uiWorkspace.openSession()`, which both releases provide |
+
+Two upstream details moved between those releases and are handled here: the
+session list snapshot no longer carries a `current` field (the open session is
+read from `retainedBy.mainView` instead), and the icons lost their old
+size-suffixed aliases. The **Open session** button in the dialog asks the
+workspace facade to reveal the imported Session — `ISessions.open()` does not
+exist in DSH 0.2.x, so the earlier `typeof service.open === 'function'` guard
+silently did nothing.
 
 ## Install
 
@@ -54,10 +71,16 @@ Two entry points open the same dialog:
 
 The header entry sits inside the menu the Session-log export plugin owns, so the
 two export/import actions read as one pair. That menu is built from a literal
-item array with no contribution point for another plugin, so the item is added
-by injecting markup into the rendered menu ([details](#the-header-menu-item));
-the sidebar entry is the one that needs no such cooperation, and it stays
-available in every composition.
+item array, so the item is added by injecting markup into the rendered menu
+([details](#the-header-menu-item)); the sidebar entry is the one that needs no
+such cooperation, and it stays available in every composition.
+
+DSH 0.2.1 does expose a first-class slot for Session-header entries,
+`conversation.session.header.utilities`, which the export plugin itself
+registers into. An entry registered there renders as **its own cell in the
+header**, not inside the more-actions menu, so it cannot take the place of the
+menu item — the injection below remains how this plugin sits *next to* the
+download action.
 
 In the dialog:
 
@@ -77,8 +100,7 @@ needs a reload.
 ### The header menu item
 
 `@deepseek-ai/dsh-session-log-export` renders the Session header's more-actions
-menu from a literal `items` array, so there is no slot, service, or hook another
-plugin can use to add an entry. The import item is therefore injected into that
+menu from a literal `items` array, so the import item is injected into that
 menu's DOM when it opens:
 
 - the injected node is a **clone of the download item**, so it inherits the
